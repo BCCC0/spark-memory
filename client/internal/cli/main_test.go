@@ -16,7 +16,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	name := "mem"
+	name := "mem-go"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}

@@ -2,6 +2,25 @@
 
 This is the user-facing contract for queued writes.
 
+## Identifying the client and daemon
+
+```text
+$ mem --version
+mem 0.1.2 (go, commit 5b1338c56dfb)
+
+$ mem --version
+mem 0.1.2 (python, commit 5b1338c56dfb)
+
+$ memd --version
+memd 0.1.2 (python, commit 5b1338c56dfb)
+```
+
+The implementation name is part of the output because both the Go client and the
+Python library install a command called `mem`. A released Go binary is installed
+as `mem`; a development build is named `mem-go` so it does not silently shadow a
+release on `PATH`. The Python CLI lives inside the project virtualenv and is
+normally invoked with `uv run mem`.
+
 ## What waits, blocks, or returns a hint
 
 | Command or path | Before returning | Blocks the operation? | Visible result |

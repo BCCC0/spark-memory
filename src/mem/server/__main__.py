@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 
+from ..version import __version__, build_commit
 from .app import Settings, create_app
 
 
@@ -69,6 +70,11 @@ def build_settings(args: argparse.Namespace) -> Settings:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="memd", description="the mem daemon")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"memd {__version__} (python, commit {build_commit()})",
+    )
     parser.add_argument(
         "--repo", default=os.environ.get("MEM_REPO", str(Path.home() / "memory"))
     )

@@ -43,7 +43,7 @@ from .keys import add_key, rm_key, mv_key
 from .paths import resolve_origin
 from . import hooks
 from . import tracking
-from .version import API_VERSION
+from .version import API_VERSION, __version__, build_commit
 
 #: `mem flush` is the explicit barrier, but it must not hang forever when the
 #: index cannot catch up. The Go client uses the same three-minute bound.
@@ -90,6 +90,11 @@ def build_parser() -> _Parser:
     parser = _Parser(prog="mem", description="stateless project memory")
     parser.add_argument("--human", action="store_true", help="human-readable output")
     parser.add_argument("--server", help="override the server URL")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"mem {__version__} (python, commit {build_commit()})",
+    )
     sub = parser.add_subparsers(dest="command")
     common = _common_flags()
 

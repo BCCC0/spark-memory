@@ -30,16 +30,16 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
           go test -race ./...
-          go build -o bin/mem ./cmd/mem
+          go build -o bin/mem-go ./cmd/mem
       - name: Run client acceptance tests against Go
         run: |
-          MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem" uv run pytest tests -n 4 -k 'not python and not test_hook_splits_more_than_100_files_into_server_sized_batches'
-          MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem" uv run pytest tests/test_hooks.py::test_hook_splits_more_than_100_files_into_server_sized_batches -n 0
+          MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem-go" uv run pytest tests -n 4 -k 'not python and not test_hook_splits_more_than_100_files_into_server_sized_batches'
+          MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem-go" uv run pytest tests/test_hooks.py::test_hook_splits_more_than_100_files_into_server_sized_batches -n 0
       - name: Cross-build static clients
         working-directory: client
         run: |
           for target in windows/amd64 linux/amd64 linux/arm64; do
-            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /tmp/mem-${target//\//-} ./cmd/mem
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /tmp/mem-go-${target//\//-} ./cmd/mem
           done
   test:
     runs-on: ubuntu-latest

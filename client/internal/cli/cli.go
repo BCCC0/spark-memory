@@ -196,6 +196,10 @@ func parse(args []string) (options, error) {
 			o.flags["help"] = "true"
 			return o, nil
 		}
+		if !endOptions && a == "--version" {
+			o.flags["version"] = "true"
+			return o, nil
+		}
 		if !endOptions && strings.HasPrefix(a, "-") && a != "-" {
 			if !strings.HasPrefix(a, "--") {
 				spec := currentSpec(&o)
@@ -332,6 +336,10 @@ func Run(args []string) int {
 	o, err := parse(args)
 	if err != nil {
 		return fail(err, false)
+	}
+	if o.has("version") {
+		printVersion()
+		return 0
 	}
 	if o.has("help") {
 		printHelp(o)

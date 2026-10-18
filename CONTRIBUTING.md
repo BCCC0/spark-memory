@@ -21,13 +21,14 @@ cd client
 gofmt -l .
 go vet ./...
 go test ./...
+go build -o bin/mem-go ./cmd/mem
 ```
 
 Run the Python acceptance suite against the Go binary:
 
 ```bash
 cd ..
-MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem" uv run pytest tests \
+MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem-go" uv run pytest tests \
   -k 'not python and not test_hook_splits_more_than_100_files_into_server_sized_batches'
 ```
 

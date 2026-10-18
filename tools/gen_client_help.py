@@ -59,4 +59,8 @@ for args in commands:
     output[" ".join(args) or "root"] = parser.format_help()
 
 target = root / "client" / "internal" / "cli" / "help.json"
-target.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+target.write_text(
+    json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+    newline="\n",
+)

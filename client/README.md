@@ -25,10 +25,14 @@ are pure Go, so `CGO_ENABLED=0` builds remain static.
 Build from this directory with Go 1.27.2:
 
 ```powershell
-go build -o bin/mem.exe ./cmd/mem
+go build -o bin/mem-go.exe ./cmd/mem
 go test ./...
 go vet ./...
 ```
+
+The development build is intentionally named `mem-go.exe` so it cannot be
+confused with a released `mem.exe` on `PATH`. Release assets are installed as
+`mem.exe`; `mem --version` identifies the implementation and commit.
 
 For Windows cross-platform builds, set `CGO_ENABLED=0`, `GOOS`, and `GOARCH`
 before each `go build`. Supported targets are `windows/amd64`, `linux/amd64`,
