@@ -237,7 +237,7 @@ class MemoryRepo:
         """
         raw = self.git_bytes(
             "diff", "--name-status", "-z", "--no-renames",
-            older, newer, "--", "projects/", check=False,
+            older, newer, "--", "projects/",
         )
         fields = raw.decode("utf-8", "replace").split("\0")
         paths: list[str] = []

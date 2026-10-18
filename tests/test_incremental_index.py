@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from mem.errors import MemError
 from mem.ids import note_relpath
 from mem.server.repo import MemoryRepo
 from mem.server.search import SearchIndex
@@ -58,6 +61,33 @@ def test_a_move_deletes_the_old_path_and_indexes_the_new_one(tmp_path):
     assert index.ensure(repo, repo.head()) is True
     hits = index.search("renamed-token")
     assert [hit["id"] for hit in hits] == ["new"], hits
+
+
+def test_a_failed_diff_does_not_advance_the_indexed_head(tmp_path, monkeypatch):
+    repo = MemoryRepo(tmp_path / "repo")
+    repo.ensure()
+    _add(repo, "alpha", "alpha", "alpha-token")
+    index = SearchIndex(tmp_path / "search.db")
+    index.ensure(repo, repo.head())
+    indexed_before = index.indexed_head()
+
+    _add(repo, "beta", "beta", "beta-token")
+
+    def broken_diff(_older, _newer):
+        raise MemError("internal_error", "git diff failed")
+
+    monkeypatch.setattr(repo, "changed_paths", broken_diff)
+    with pytest.raises(MemError):
+        index.ensure(repo, repo.head())
+    assert index.indexed_head() == indexed_before
+
+
+def test_changed_paths_raises_on_an_invalid_range(tmp_path):
+    repo = MemoryRepo(tmp_path / "repo")
+    repo.ensure()
+    _add(repo, "alpha", "alpha")
+    with pytest.raises(MemError):
+        repo.changed_paths("0" * 40, repo.head())
 
 
 def test_rewritten_history_falls_back_to_a_full_rebuild(tmp_path, monkeypatch):
