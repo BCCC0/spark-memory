@@ -950,7 +950,7 @@ def create_app(settings: Settings) -> Starlette:
         settings.secret = _load_or_create_secret(settings.enroll_secret)
 
     reindexer = Reindexer(repo, index, vectors)
-    write_queue = WriteQueue(settings.state_dir)
+    write_queue = WriteQueue(settings.state_dir, settings.repo_root)
     queue_wake = asyncio.Event()
 
     # -- handlers ----------------------------------------------------------

@@ -57,11 +57,12 @@ def _scoped_key(project: str, device_id: str, idem: str | None) -> str | None:
 
 
 class WriteQueue:
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, state_dir: Path, repo_root: Path | None = None) -> None:
         self.root = state_dir / "write-queue"
         self.spool = self.root / "spool"
         self.spool.mkdir(parents=True, exist_ok=True)
         self.db = self.root / "jobs.db"
+        self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
         self._guard = threading.RLock()
         self._worker_handle = None
         with self._connect() as db:
@@ -96,20 +97,27 @@ class WriteQueue:
                 CREATE INDEX IF NOT EXISTS job_targets_lookup ON job_targets(project, id);
             """)
 
-    # BUG(high): the single-publisher lock is keyed to the STATE DIRECTORY, not the
-    # repository.
-    # Why valid: `self.root` is `<state-dir>/write-queue` (see `__init__`), and
-    # `--state-dir` defaults to `<repo>/.mem` but is operator-settable. Two daemons
-    # serving the same repository with different `--state-dir` values therefore take
-    # different lock files and each appoints itself publisher -- exactly the duplicate
-    # deployment INSTALL.md says silently falsifies the atomic-write guarantee.
-    # `WriteLock` (lock.py) is only an in-process mutex and cannot cover this.
-    # Fix hint: key the lock to the repository itself (for example
-    # `<repo>/.git/mem-worker.lock`) so a second daemon fails closed at startup whatever
-    # `--state-dir` names, and keep this method the single acquisition point.
+    def _lock_path(self) -> Path:
+        """The publisher lock belongs to the repository, not the state directory.
+
+        `--state-dir` is operator-settable, so a lock under it lets two daemons
+        serving the same repository appoint themselves publisher independently.
+        The repository's git dir is the stable identity both must agree on.
+        """
+        if self.repo_root is not None:
+            return self.repo_root / ".git" / "mem-worker.lock"
+        # Library/test fallback: no repository was supplied.
+        return self.root / "worker.lock"
+
     def claim_worker(self) -> None:
         """Permit only one publisher for this repository across processes."""
-        handle = (self.root / "worker.lock").open("a+b")
+        lock_path = self._lock_path()
+        try:
+            handle = lock_path.open("a+b")
+        except OSError as exc:
+            raise MemError(
+                "internal_error", f"cannot open publisher lock {lock_path}: {exc}"
+            ) from exc
         try:
             handle.seek(0)
             if os.name == "nt":

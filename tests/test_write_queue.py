@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 
+import pytest
+
 from mem.errors import MemError
 from mem.server.queue import WriteQueue
 
@@ -57,6 +59,25 @@ def test_only_one_process_can_publish_queue(tmp_path):
             raise AssertionError("second worker acquired the queue")
     finally:
         left.release_worker()
+    right.claim_worker()
+    right.release_worker()
+
+
+def test_publisher_lock_is_keyed_to_the_repository(tmp_path):
+    """Different state dirs must not create two publishers for one repo."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    left = WriteQueue(tmp_path / "state-a", repo)
+    right = WriteQueue(tmp_path / "state-b", repo)
+
+    left.claim_worker()
+    try:
+        with pytest.raises(MemError) as blocked:
+            right.claim_worker()
+        assert blocked.value.code == "target_busy"
+    finally:
+        left.release_worker()
+
     right.claim_worker()
     right.release_worker()
 
