@@ -27,7 +27,7 @@ reuse them in a deployed environment.
 ## Staging and public history
 
 The original staging history is retained privately as the archived
-`BCCC0/spark-memory-private` repo. The public `BCCC0/spark-memory` repo is built
+`BCCC0/spark-memory-staging-private` repo. The public `BCCC0/spark-memory` repo is built
 from a sanitized baseline commit so no operational or developer-specific path is
 part of its history. Keep operational deployment material, real endpoints, and
 secret-rotation records out of both repos.
