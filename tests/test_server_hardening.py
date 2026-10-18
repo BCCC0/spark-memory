@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import urllib.request
 
@@ -65,6 +66,51 @@ def test_queue_loop_survives_a_next_job_failure(repo_template, tmp_path, monkeyp
     finally:
         harness.stop()
     assert calls["n"] >= 2
+
+
+def test_a_mirror_reset_failure_cannot_unpublish_a_settled_write(ready, monkeypatch):
+    """A timeout after update-ref must not turn a shipped write into a failed job.
+
+    The reset refreshes only the served checkout; the commit is already the ref's
+    new value. Recording the job as failed would de-key its idempotency entry and a
+    retry would create a second job for the same bytes.
+    """
+    served = ready.repo.resolve()
+    original = MemoryRepo.git
+
+    def flaky_git(self, *args, **kwargs):
+        if self.root.resolve() == served and args[:2] == ("reset", "--hard"):
+            raise MemError("internal_error", "git operation timed out")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryRepo, "git", flaky_git)
+    client = Client(ready.server, ready.token())
+    body = note_text(summary="published", body="reset-timeout-token").encode("utf-8")
+    with sqlite3.connect(ready.state / "write-queue" / "jobs.db") as db:
+        before = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+    first = client.add(
+        "demo", "published", body,
+        filename="published.md", idempotency_key="reset-timeout",
+    )
+    finished = ready.wait_for_receipt(first["receipt"])
+    assert finished["head"], finished
+    assert ready.cli_json("read", "published")["summary"] == "published"
+
+    retry = client.add(
+        "demo", "published", body,
+        filename="published.md", idempotency_key="reset-timeout",
+    )
+    assert retry["idempotent_replay"] is True
+    assert retry["receipt"] == first["receipt"]
+
+    with sqlite3.connect(ready.state / "write-queue" / "jobs.db") as db:
+        after = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        status = db.execute(
+            "SELECT status FROM jobs WHERE id=?", (first["receipt"],)
+        ).fetchone()[0]
+    assert after == before + 1, "the retry must not enqueue a second job"
+    assert status == "committed"
 
 
 def test_writes_cannot_escape_to_a_sibling_with_the_same_prefix(tmp_path):

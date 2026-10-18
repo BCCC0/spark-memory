@@ -1926,12 +1926,16 @@ def create_app(settings: Settings) -> Starlette:
 
     queue_stopping = False
 
+    def _head_contains(revision: str) -> bool:
+        """True when *revision* is already an ancestor of the served HEAD."""
+        return bool(revision) and revision in repo.git(
+            "rev-list", "HEAD", check=False
+        ).splitlines()
+
     def _publish_queued(job: dict[str, Any]) -> dict[str, Any]:
         receipt = job["id"]
-        if job.get("prepared_head"):
-            ancestors = repo.git("rev-list", "HEAD", check=False).splitlines()
-            if job["prepared_head"] in ancestors:
-                return json.loads(job["prepared_result"])
+        if job.get("prepared_head") and _head_contains(job["prepared_head"]):
+            return json.loads(job["prepared_result"])
         base = repo.head()
         ref = repo.git("symbolic-ref", "HEAD").strip()
         # Keep the worktree path short: Git for Windows otherwise interprets
@@ -1957,29 +1961,36 @@ def create_app(settings: Settings) -> Starlette:
             head = work.head()
             write_queue.prepared(receipt, head, result)
             if head != base:
-                repo.git("update-ref", ref, head, base)
-            # BUG(high): a failure AFTER the ref has moved records a shipped write as
-            # failed, and a client retry then runs a SECOND job.
-            # Why valid: `update-ref` above publishes the commit, but `check=False` here
-            # suppresses only a non-zero exit -- it does not suppress
-            # `subprocess.TimeoutExpired`, which `repo.git` converts into
-            # `MemError("internal_error")` (see `git_bytes` in repo.py). The exception
-            # reaches `_queue_loop`, which calls `finish(error=...)`, so the job is
-            # recorded as failed even though its commit is live and `prepared_result`
-            # already holds the real outcome. Because `finish` leaves the failed row,
-            # `submit` de-keys the idempotency entry, so a retry creates a second job.
-            # `prepared_head` only rescues this across a RESTART, via the check at the
-            # top of `_publish_queued`.
-            # Fix hint: separate publication from mirror refresh -- settle success once
-            # `update-ref` returns or `prepared_head` already covers the job, and
-            # downgrade a reset timeout to logged mirror drift that startup repairs,
-            # rather than to job failure.
+                try:
+                    repo.git("update-ref", ref, head, base)
+                except MemError:
+                    # `update-ref` may have completed before its process timed out.
+                    # Once the prepared commit is reachable, the write is shipped and
+                    # must be settled as success, not recorded as failed.
+                    if not _head_contains(head):
+                        raise
             # The checkout is a mirror, not the read source. Refresh it after
-            # publication; a crash is repaired at startup.
-            repo.git("reset", "--hard", head, check=False)
+            # publication; a crash is repaired at startup. A refresh failure must
+            # never turn an already-published write into a failed job.
+            try:
+                repo.git("reset", "--hard", head, check=False)
+            except MemError:
+                logger.warning(
+                    "mirror refresh failed after publishing %s at %s; startup will repair it",
+                    receipt,
+                    head,
+                    exc_info=True,
+                )
             return result
         finally:
-            repo.git("worktree", "remove", "--force", str(stage), check=False)
+            try:
+                repo.git("worktree", "remove", "--force", str(stage), check=False)
+            except MemError:
+                logger.warning(
+                    "could not remove staging worktree %s; leaving it for cleanup",
+                    stage,
+                    exc_info=True,
+                )
             if stage.resolve().is_relative_to(stage_root.resolve()):
                 shutil.rmtree(stage, ignore_errors=True)
 
