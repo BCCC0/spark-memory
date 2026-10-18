@@ -864,6 +864,18 @@ class Reindexer:
         self._event.set()
         self.stats["requested"] += 1
 
+    def nudge(self) -> None:
+        """Ask for a pass unless the last failure is still backing off.
+
+        A read poll may discover an externally-made commit that no write path
+        scheduled, so it still needs to trigger indexing. It must not, however,
+        set the event on every poll while a failed pass is sleeping: that would
+        retry at the poll rate instead of the configured backoff.
+        """
+        if self._failure_delay > 0:
+            return
+        self.request()
+
     async def _loop(self) -> None:
         while True:
             await self._event.wait()
@@ -1033,7 +1045,10 @@ def create_app(settings: Settings) -> Starlette:
             progress["head"] = await asyncio.to_thread(repo.head)
             progress["indexed_head"] = await asyncio.to_thread(index.indexed_head)
             if progress["head"] != progress["indexed_head"]:
-                reindexer.request()
+                # An external commit has no write path to schedule indexing.
+                # `nudge` still respects a failed pass's backoff.
+                reindexer.nudge()
+        progress["reindex"] = dict(reindexer.stats)
         return JSONResponse(progress)
 
     async def projects(request: Request) -> JSONResponse:

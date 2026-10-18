@@ -45,6 +45,10 @@ from . import hooks
 from . import tracking
 from .version import API_VERSION
 
+#: `mem flush` is the explicit barrier, but it must not hang forever when the
+#: index cannot catch up. The Go client uses the same three-minute bound.
+FLUSH_TIMEOUT = 180.0
+
 
 class _Parser(argparse.ArgumentParser):
     """argparse exits 2 on a usage error, which collides with
@@ -572,23 +576,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-# BUG(high): this poll loop has no deadline, so an index that never catches up
-# hangs `mem flush` forever with no error and no exit.
-# Why valid: the loop exits only when pending is 0 and indexed_head equals head;
-# a permanently failing embedder leaves indexed_head behind head, so it spins at
-# 10 Hz indefinitely, and each queue_progress call re-triggers
-# reindexer.request() in the server's queue_progress handler (server/app.py),
-# setting the event that the reindexer's backoff had cleared, so a failing
-# reindex retries at roughly the poll rate instead of its 60 s backoff.
-# Fix hint: bound the wait and raise a typed timeout error; surfacing the
-# reindexer's error state and clearing the pending flag should be the server's
-# job, so the poll stops re-requesting the reindex.
 def cmd_flush(args: argparse.Namespace) -> int:
     config = cfg.load(require_project=False, require_auth=True)
     client = _client(config, args)
     progress = client.queue_progress()
     through = progress["through"]
+    deadline = time.monotonic() + FLUSH_TIMEOUT
     while progress["pending"] or progress.get("indexed_head") != progress.get("head"):
+        if time.monotonic() >= deadline:
+            raise MemError(
+                "lock_timeout",
+                "flush timed out waiting for queued writes and indexing",
+                {"through": through},
+            )
         time.sleep(0.1)
         progress = client.queue_progress(through)
     if progress["failed"]:

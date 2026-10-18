@@ -12,8 +12,10 @@ import pytest
 from conftest import Harness, note_text
 from mem.client import Client
 from mem.errors import MemError
+from mem.server.app import Reindexer
 from mem.server.repo import MemoryRepo
 from mem.server.queue import WriteQueue
+from mem.server.search import SearchIndex
 
 
 def test_health_does_not_run_git_on_the_event_loop(harness, monkeypatch):
@@ -111,6 +113,43 @@ def test_a_mirror_reset_failure_cannot_unpublish_a_settled_write(ready, monkeypa
         ).fetchone()[0]
     assert after == before + 1, "the retry must not enqueue a second job"
     assert status == "committed"
+
+
+def test_queue_polling_nudges_the_reindexer_without_requesting_directly(ready, monkeypatch):
+    ready.flush()
+    calls = {"nudge": 0, "request": 0}
+
+    monkeypatch.setattr(
+        Reindexer, "nudge", lambda self: calls.__setitem__("nudge", calls["nudge"] + 1)
+    )
+    monkeypatch.setattr(
+        Reindexer, "request", lambda self: calls.__setitem__("request", calls["request"] + 1)
+    )
+    monkeypatch.setattr(SearchIndex, "indexed_head", lambda self: "stale-head")
+
+    progress = Client(ready.server, ready.token()).queue_progress()
+    assert progress["indexed_head"] == "stale-head"
+    assert "reindex" in progress
+    assert calls == {"nudge": 1, "request": 0}
+
+
+def test_nudge_respects_a_failed_passes_backoff():
+    class Fake:
+        _failure_delay = 1.0
+
+        def __init__(self):
+            self.requests = 0
+
+        def request(self):
+            self.requests += 1
+
+    fake = Fake()
+    Reindexer.nudge(fake)
+    assert fake.requests == 0
+
+    fake._failure_delay = 0.0
+    Reindexer.nudge(fake)
+    assert fake.requests == 1
 
 
 def test_writes_cannot_escape_to_a_sibling_with_the_same_prefix(tmp_path):

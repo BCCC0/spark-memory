@@ -13,7 +13,7 @@ This is the user-facing contract for queued writes.
 | `mem read ID` | Check the committed Git snapshot and unfinished/failed writes affecting the ID | **No** waiting for the queue | Committed record, `pending` hint, or failed-write error with the last committed revision |
 | `mem read ID@REV` | Read the requested committed revision | **No** waiting for the queue | Historical record, regardless of current queued work |
 | `mem search` | Search the latest completed index | **No** waiting for writes or indexing | Hits plus a pending-write hint and index-lag indicator |
-| `mem flush` | Wait for every job accepted before the command starts and for the text index to reach the resulting head | **Yes**, intentionally waits | `flushed` with a Git head, or a typed error listing failed jobs |
+| `mem flush` | Wait for every job accepted before the command starts and for the text index to reach the resulting head, bounded to 3 minutes | **Yes**, intentionally waits | `flushed` with a Git head, a typed error listing failed jobs, or `lock_timeout` (exit 3) when the index cannot catch up |
 
 “Blocks” in this table means *refuses the requested action*. Uploading a large
 request and durably recording it still take time. No CLI read or search command
@@ -24,7 +24,10 @@ command.
 
 Failed receipts remain visible to `mem flush` after the queue drains. Its error
 lists those receipts. A later successful write for every affected ID resolves
-the earlier failure for future flushes.
+the earlier failure for future flushes. If the queue drains but the text index
+cannot catch up within 3 minutes, `mem flush` fails with `lock_timeout` and exit
+3 rather than waiting forever; the response and `mem index` show the reindexer's
+last error.
 
 ## Hints, warnings, and errors
 

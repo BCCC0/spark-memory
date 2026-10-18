@@ -326,8 +326,9 @@ mem search "sqlite"
 ```
 
 `add` returns a **queued** receipt; `flush` waits for the write and the text
-index to reach the resulting head. A subsequent `read` returns the committed
-record.
+index to reach the resulting head, but gives up after 3 minutes with
+`lock_timeout` (exit 3) if the index cannot catch up. A subsequent `read`
+returns the committed record.
 
 Useful commands:
 
