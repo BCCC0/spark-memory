@@ -30,6 +30,7 @@ import unicodedata
 from pathlib import Path
 
 from . import frontmatter as fm
+from ..ids import split_public_path
 from ..pointers import pointer_record
 from .repo import MemoryRepo
 
@@ -169,10 +170,21 @@ class SearchIndex:
         return row["value"] if row else None
 
     def ensure(self, repo: MemoryRepo, head: str | None) -> bool:
-        """Rebuild if the index is stale for ``head``. Returns True if rebuilt."""
-        if head and self.indexed_head() == head:
+        """Advance the index to ``head``; return True when it changed.
+
+        A linear commit can be indexed by touching only the paths that commit
+        changed. A rewritten history, a schema repair, or a first build still
+        needs the full rebuild.
+        """
+        if not head:
             return False
-        self.rebuild(repo, head)
+        indexed = self.indexed_head()
+        if indexed == head:
+            return False
+        if indexed and repo.is_ancestor(indexed, head):
+            self.update(repo, head, repo.changed_paths(indexed, head))
+        else:
+            self.rebuild(repo, head)
         return True
 
     def indexed_at(self) -> float | None:
@@ -187,69 +199,86 @@ class SearchIndex:
         except (TypeError, ValueError):
             return None
 
-    # BUG(high): every published write rebuilds the ENTIRE text index.
-    # Why valid: this method deletes and reinserts the whole corpus in one transaction,
-    # and its only production caller is the reindexer pass requested after each queued
-    # job (in `_queue_loop`). The cost is therefore O(corpus) per write: adding one note
-    # re-reads and re-parses every note in the repository. It also re-reads each body
-    # through git rather than reusing the bytes the write already had in hand.
-    # Fix hint: make indexing incremental -- upsert or delete only the paths a commit
-    # touched -- and keep the full rebuild for `mem index --rebuild` and schema repair,
-    # where the current code is correct. Note that the docstring above `ensure` and the
-    # comments in app.py calling the text index cheap both promise a cheaper contract
-    # than this code delivers.
+    def _row_for(self, repo: MemoryRepo, path: str) -> tuple[object, ...] | None:
+        """The index row for one path, or None when it is not indexable."""
+        try:
+            split = split_public_path(path)
+            if split is None:
+                return None
+            project, note_id = split
+            text = repo.read_note(path)
+            data, body = fm.parse(text) if path.endswith(".md") else ({}, text)
+            pointer = pointer_record(text) if path.endswith(".md") else None
+        except Exception:  # noqa: BLE001 - a broken note must not break search
+            return None
+        if pointer and pointer.kind == "locked":
+            summary = pointer.summary
+            body = ""
+        else:
+            summary = (pointer.canonical if pointer else str(data.get("summary") or
+                       (body.splitlines()[0][:200] if body.splitlines() else "")))
+        return (
+            note_id,
+            project,
+            path,
+            str(data.get("status", "")),
+            str(data.get("type", "")),
+            _tags_json(data.get("tags")),
+            fm.title_of(body) or "",
+            summary,
+            body,
+        )
+
+    @staticmethod
+    def _stamp(conn: sqlite3.Connection, head: str | None) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('head', ?)", (head or "",)
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('indexed_at', ?)",
+            (str(time.time()),),
+        )
+
     def rebuild(self, repo: MemoryRepo, head: str | None) -> int:
+        """Replace the whole index. Used for first build, repair, and history rewrites."""
         self._prepare_if_needed()
-        rows = []
-        for meta in repo.notes():
-            try:
-                text = repo.read_note(meta.path)
-                data, body = fm.parse(text) if meta.path.endswith(".md") else ({}, text)
-                pointer = pointer_record(text) if meta.path.endswith(".md") else None
-            except Exception:  # noqa: BLE001 - a broken note must not break search
-                continue
-            if pointer and pointer.kind == "locked":
-                summary = pointer.summary
-                body = ""
-            else:
-                summary = (pointer.canonical if pointer else str(data.get("summary") or
-                           (body.splitlines()[0][:200] if body.splitlines() else "")))
-            rows.append(
-                (
-                    meta.id,
-                    meta.project,
-                    meta.path,
-                    str(data.get("status", "")),
-                    str(data.get("type", "")),
-                    _tags_json(data.get("tags")),
-                    fm.title_of(body) or "",
-                    summary,
-                    body,
-                )
-            )
+        rows = [
+            row for path in repo.list_note_paths()
+            if (row := self._row_for(repo, path)) is not None
+        ]
         with self._connect() as conn:
-            conn.execute("DELETE FROM notes")
-            conn.execute("DELETE FROM docs")
             target = "notes" if self._fts else "docs"
-            if self._fts:
-                conn.executemany(
-                    f"INSERT INTO {target}(note_id, project, path, status, note_type,"
-                    " tags, title, summary, body) VALUES (?,?,?,?,?,?,?,?,?)",
-                    rows,
-                )
-            else:
-                conn.executemany(
-                    f"INSERT INTO {target}(note_id, project, path, status, note_type,"
-                    " tags, title, summary, body) VALUES (?,?,?,?,?,?,?,?,?)",
-                    rows,
-                )
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES ('head', ?)", (head or "",)
+            conn.execute(f"DELETE FROM {target}")
+            conn.executemany(
+                f"INSERT INTO {target}(note_id, project, path, status, note_type,"
+                " tags, title, summary, body) VALUES (?,?,?,?,?,?,?,?,?)",
+                rows,
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES ('indexed_at', ?)",
-                (str(time.time()),),
+            self._stamp(conn, head)
+        return len(rows)
+
+    def update(self, repo: MemoryRepo, head: str | None, changed_paths: list[str]) -> int:
+        """Replace only the rows for paths touched by one commit."""
+        self._prepare_if_needed()
+        paths = sorted({path for path in changed_paths if path.startswith("projects/")})
+        rows = []
+        for path in paths:
+            if repo.is_inline_note(path):
+                row = self._row_for(repo, path)
+                if row is not None:
+                    rows.append(row)
+        with self._connect() as conn:
+            target = "notes" if self._fts else "docs"
+            conn.executemany(
+                f"DELETE FROM {target} WHERE path=?",
+                [(path,) for path in paths],
             )
+            conn.executemany(
+                f"INSERT INTO {target}(note_id, project, path, status, note_type,"
+                " tags, title, summary, body) VALUES (?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            self._stamp(conn, head)
         return len(rows)
 
     # -- querying ----------------------------------------------------------

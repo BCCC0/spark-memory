@@ -223,6 +223,40 @@ class MemoryRepo:
         except (OSError, UnicodeDecodeError, MemError):
             return False
 
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        """True when *older* is reachable from *newer* (including equality)."""
+        if not older or not newer:
+            return False
+        return self.git("merge-base", older, newer, check=False).strip() == older
+
+    def changed_paths(self, older: str, newer: str) -> list[str]:
+        """Paths under ``projects/`` added, changed, or deleted in a range.
+
+        ``--no-renames`` makes a move a delete plus an add, which is exactly
+        what an incremental index needs: remove the old path, add the new one.
+        """
+        raw = self.git_bytes(
+            "diff", "--name-status", "-z", "--no-renames",
+            older, newer, "--", "projects/", check=False,
+        )
+        fields = raw.decode("utf-8", "replace").split("\0")
+        paths: list[str] = []
+        for index in range(0, len(fields) - 1, 2):
+            status, path = fields[index], fields[index + 1]
+            if status and path:
+                paths.append(path)
+        return sorted(set(paths))
+
+    def is_inline_note(self, relpath: str, revision: str | None = None) -> bool:
+        """True when *relpath* is a current, inline note at *revision*."""
+        if not relpath.startswith("projects/"):
+            return False
+        if Path(relpath).suffix.lower() not in self.inline_extensions:
+            return False
+        if any(part in IGNORED_DIRS for part in relpath.split("/")):
+            return False
+        return self._is_utf8_record(relpath, revision)
+
     def read_note(self, relpath: str, revision: str | None = None) -> str:
         return self.note_bytes(relpath, revision).decode("utf-8", "replace")
 

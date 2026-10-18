@@ -229,7 +229,9 @@ project for a memory win on a service that runs on one host we control.
   recommending `mem python` for anything beyond a single command.
 - The server-side defects already marked in the source are unaffected by this
   decision and remain due: `memd` stays Python, so every queue, indexing and
-  locking defect must be fixed where it is.
+  locking defect must be fixed where it is. The six high-severity defects are
+  fixed for public `v0.1.0`; the remaining medium/low annotations are the
+  post-release backlog.
 
 ## 8. Prerequisites
 
@@ -241,8 +243,8 @@ done, so that the Go implementation has a written target and a drift detector.
    to the absent `MEM-*.md` documents resolved.
 2. **Write the conformance vectors** (§7), including the YAML and text-length
    divergences enumerated in §5.2 and §5.3.
-3. **Fix the server-side defects** marked in the source. They are needed under
-   every outcome and they sharpen the contract the port targets.
+3. **Fix the server-side defects** marked in the source. The high-severity set
+   is fixed for public `v0.1.0`; the medium/low set remains due.
 4. **Port the client**, keeping the 296 existing tests as the acceptance suite.
 5. **Retire the Python CLI**, keeping the package as a library.
 
