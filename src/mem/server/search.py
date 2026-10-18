@@ -113,19 +113,13 @@ class SearchIndex:
         self._fts = True
         self._connect_and_prepare()
 
-    # BUG(high): the text index runs without WAL, so a rebuild excludes every reader.
-    # Why valid: no `journal_mode=WAL` is set here, while `rebuild` below replaces the
-    # whole corpus inside one transaction and is invoked once per published write. A
-    # concurrent `search` that waits past the 10 s timeout raises an uncaught
-    # `sqlite3.OperationalError`, which `handle_any` turns into an HTTP 500 -- so a
-    # write burst can fail reads. Every caller (`rebuild`, `ensure`, `indexed_head`,
-    # `indexed_at`, `search`) shares this factory, so the fix belongs here.
-    # Fix hint: set `PRAGMA journal_mode=WAL` plus an explicit `busy_timeout` on this
-    # connection factory, so the rebuilding writer and concurrent readers stop excluding
-    # each other.
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
+        # WAL lets readers keep the last committed snapshot while a rebuild is
+        # writing; without it a full replacement excludes every concurrent search.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
     def _connect_and_prepare(self) -> None:

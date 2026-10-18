@@ -9,7 +9,24 @@ matters — that a loosened result is **marked**.
 from __future__ import annotations
 
 from conftest import note_text
-from mem.server.search import _fts_query, _relaxed_query
+from mem.server.search import SearchIndex, _fts_query, _relaxed_query
+
+
+def test_text_index_uses_wal_and_a_busy_timeout(tmp_path):
+    index = SearchIndex(tmp_path / "search.db")
+    with index._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+
+
+def test_a_writer_does_not_exclude_a_reader(tmp_path):
+    index = SearchIndex(tmp_path / "search.db")
+    with index._connect() as writer:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('probe', '1')")
+        with index._connect() as reader:
+            assert reader.execute("SELECT COUNT(*) FROM meta").fetchone()[0] >= 0
+        writer.rollback()
 
 # -- the strict renderer -------------------------------------------------------
 
