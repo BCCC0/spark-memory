@@ -82,6 +82,39 @@ def test_publisher_lock_is_keyed_to_the_repository(tmp_path):
     right.release_worker()
 
 
+def test_publisher_lock_resolves_a_worktree_git_file(tmp_path):
+    """A worktree's `.git` is a file; its lock must use the common git dir."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("commit", "--allow-empty", "-qm", "base")
+    worktree = tmp_path / "worktree"
+    git("worktree", "add", "-q", str(worktree), "HEAD")
+    assert (worktree / ".git").is_file()
+
+    left = WriteQueue(tmp_path / "state-a", worktree)
+    right = WriteQueue(tmp_path / "state-b", repo)
+    left.claim_worker()
+    try:
+        with pytest.raises(MemError) as blocked:
+            right.claim_worker()
+        assert blocked.value.code == "target_busy"
+    finally:
+        left.release_worker()
+
+    right.claim_worker()
+    right.release_worker()
+    assert (repo / ".git" / "mem-worker.lock").exists()
+
+
 def test_worker_lock_is_visible_across_processes(tmp_path):
     queue = WriteQueue(tmp_path)
     code = (

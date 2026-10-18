@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -104,10 +105,35 @@ class WriteQueue:
         serving the same repository appoint themselves publisher independently.
         The repository's git dir is the stable identity both must agree on.
         """
-        if self.repo_root is not None:
-            return self.repo_root / ".git" / "mem-worker.lock"
-        # Library/test fallback: no repository was supplied.
-        return self.root / "worker.lock"
+        if self.repo_root is None:
+            # Library/test fallback: no repository was supplied.
+            return self.root / "worker.lock"
+        dot_git = self.repo_root / ".git"
+        if dot_git.is_dir():
+            return dot_git / "mem-worker.lock"
+        # A worktree or `--separate-git-dir` repo has a `.git` FILE. Resolve the
+        # common git dir so every worktree of one repository contends on the same
+        # publisher lock.
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(self.repo_root), "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            common = completed.stdout.strip()
+            if common:
+                path = Path(common)
+                if not path.is_absolute():
+                    path = (self.repo_root / path).resolve()
+                return path / "mem-worker.lock"
+        # Let the open fail with the real path so the operator can diagnose it.
+        return dot_git / "mem-worker.lock"
 
     def claim_worker(self) -> None:
         """Permit only one publisher for this repository across processes."""
