@@ -1,0 +1,330 @@
+"""Durable, bounded, single-consumer write queue.
+
+SQLite owns job order and reservations. Upload bytes live in a sibling spool;
+the manifest is committed only after its directory has been made durable.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sqlite3
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+from ..errors import MemError
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+else:
+    import fcntl
+
+MAX_JOBS = 1000
+MAX_PENDING_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _sync_dir(path: Path) -> None:
+    """Persist directory-entry changes on POSIX; fail closed on sync errors."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _durable_replace(source: Path, target: Path) -> None:
+    if os.name == "nt":
+        # Windows does not expose directory fsync through os.open. The documented
+        # write-through directory move supplies the metadata durability boundary.
+        move = ctypes.windll.kernel32.MoveFileExW
+        move.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+        move.restype = ctypes.c_int
+        if not move(str(source), str(target), 0x8):  # MOVEFILE_WRITE_THROUGH
+            raise ctypes.WinError()
+    else:
+        os.replace(source, target)
+        _sync_dir(target.parent)
+
+
+def _scoped_key(project: str, device_id: str, idem: str | None) -> str | None:
+    return f"{len(project)}:{project}{len(device_id)}:{device_id}{idem}" if idem else None
+
+
+class WriteQueue:
+    def __init__(self, state_dir: Path) -> None:
+        self.root = state_dir / "write-queue"
+        self.spool = self.root / "spool"
+        self.spool.mkdir(parents=True, exist_ok=True)
+        self.db = self.root / "jobs.db"
+        self._guard = threading.RLock()
+        self._worker_handle = None
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT UNIQUE NOT NULL,
+                    project TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    bytes INTEGER NOT NULL,
+                    idem TEXT UNIQUE,
+                    created REAL NOT NULL,
+                    error TEXT,
+                    result TEXT,
+                    prepared_head TEXT,
+                    prepared_result TEXT
+                );
+                CREATE TABLE IF NOT EXISTS targets (
+                    project TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    PRIMARY KEY(project, id)
+                );
+                CREATE TABLE IF NOT EXISTS job_targets (
+                    project TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    PRIMARY KEY(project, id, job_id)
+                );
+                CREATE INDEX IF NOT EXISTS jobs_status_seq ON jobs(status, seq);
+                CREATE INDEX IF NOT EXISTS job_targets_lookup ON job_targets(project, id);
+            """)
+
+    # BUG(high): the single-publisher lock is keyed to the STATE DIRECTORY, not the
+    # repository.
+    # Why valid: `self.root` is `<state-dir>/write-queue` (see `__init__`), and
+    # `--state-dir` defaults to `<repo>/.mem` but is operator-settable. Two daemons
+    # serving the same repository with different `--state-dir` values therefore take
+    # different lock files and each appoints itself publisher -- exactly the duplicate
+    # deployment INSTALL.md says silently falsifies the atomic-write guarantee.
+    # `WriteLock` (lock.py) is only an in-process mutex and cannot cover this.
+    # Fix hint: key the lock to the repository itself (for example
+    # `<repo>/.git/mem-worker.lock`) so a second daemon fails closed at startup whatever
+    # `--state-dir` names, and keep this method the single acquisition point.
+    def claim_worker(self) -> None:
+        """Permit only one publisher for this repository across processes."""
+        handle = (self.root / "worker.lock").open("a+b")
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                handle.write(b"0")
+                handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise MemError("target_busy", "another server is already processing this write queue") from exc
+        self._worker_handle = handle
+        # A prior worker's process has stopped, so its interrupted job is safe
+        # to retry. The publisher checks prepared_head before replaying it.
+        with self._guard, self._connect() as db:
+            db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
+
+    def release_worker(self) -> None:
+        handle = self._worker_handle
+        self._worker_handle = None
+        if handle is None:
+            return
+        handle.seek(0)
+        if os.name == "nt":
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+    @contextmanager
+    def _connect(self):
+        db = sqlite3.connect(self.db, timeout=15)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=FULL")
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def submit(self, *, project: str, kind: str, targets: list[str],
+               manifest: dict[str, Any], files: list[bytes | Path],
+               idem: str | None, require_empty_project: bool = False) -> dict[str, Any]:
+        if not targets or len(targets) != len(set(targets)):
+            raise MemError("invalid_request", "write needs distinct affected IDs")
+        size = sum(body.stat().st_size if isinstance(body, Path) else len(body)
+                   for body in files)
+        idem = _scoped_key(project, str(manifest.get("device_id", "")), idem)
+        with self._guard:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if idem:
+                    prior = db.execute("SELECT id, status FROM jobs WHERE idem=?", (idem,)).fetchone()
+                    if prior:
+                        if prior["status"] == "failed":
+                            db.execute("UPDATE jobs SET idem=NULL WHERE id=?", (prior["id"],))
+                        else:
+                            original_targets = [r[0] for r in db.execute(
+                                "SELECT id FROM job_targets WHERE job_id=? ORDER BY id", (prior["id"],))]
+                            return {"status": prior["status"], "receipt": prior["id"],
+                                    "affected_ids": original_targets, "idempotent_replay": True}
+                count, used = db.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(bytes),0) FROM jobs WHERE status IN ('queued','running')"
+                ).fetchone()
+                if count >= MAX_JOBS or used + size > MAX_PENDING_BYTES:
+                    raise MemError("queue_full", "server write queue is full")
+                if require_empty_project and db.execute(
+                    "SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running') LIMIT 1",
+                    (project,),
+                ).fetchone():
+                    raise MemError("target_busy", "a move requires pending project writes to finish")
+                busy = db.execute(
+                    "SELECT id FROM targets WHERE project=? AND id IN (" + ",".join("?" for _ in targets) + ") LIMIT 1",
+                    (project, *targets),
+                ).fetchone()
+                if busy:
+                    raise MemError("target_busy", f"{busy['id']} already has an unfinished write",
+                                   {"id": busy["id"]})
+                receipt = "j_" + uuid.uuid4().hex
+                temp = self.spool / (receipt + ".tmp")
+                final = self.spool / receipt
+                temp.mkdir()
+                try:
+                    for index, body in enumerate(files):
+                        with (temp / str(index)).open("wb") as stream:
+                            if isinstance(body, Path):
+                                with body.open("rb") as source:
+                                    shutil.copyfileobj(source, stream, 64 * 1024)
+                            else:
+                                stream.write(body)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                    with (temp / "manifest.json").open("w", encoding="utf-8") as stream:
+                        json.dump(manifest, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if os.name != "nt":
+                        _sync_dir(temp)
+                    _durable_replace(temp, final)
+                    db.execute(
+                        "INSERT INTO jobs(id,project,kind,status,bytes,idem,created) VALUES(?,?,?,'queued',?,?,?)",
+                        (receipt, project, kind, size, idem, time.time()),
+                    )
+                    db.executemany("INSERT INTO targets(project,id,job_id) VALUES(?,?,?)",
+                                   [(project, target, receipt) for target in targets])
+                    db.executemany("INSERT INTO job_targets(project,id,job_id) VALUES(?,?,?)",
+                                   [(project, target, receipt) for target in targets])
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    shutil.rmtree(temp, ignore_errors=True)
+                    shutil.rmtree(final, ignore_errors=True)
+                    raise
+                return {"status": "queued", "receipt": receipt,
+                        "affected_ids": targets, "idempotent_replay": False}
+
+    def next_job(self) -> dict[str, Any] | None:
+        with self._guard, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY seq LIMIT 1").fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE jobs SET status='running' WHERE id=?", (row["id"],))
+            return dict(row)
+
+    def lookup(self, project: str, device_id: str, idem: str | None) -> dict[str, Any] | None:
+        if not idem:
+            return None
+        idem = _scoped_key(project, device_id, idem)
+        with self._guard, self._connect() as db:
+            row = db.execute("SELECT id, status FROM jobs WHERE idem=?", (idem,)).fetchone()
+            if row is None or row["status"] == "failed":
+                return None
+            original_targets = [r[0] for r in db.execute(
+                "SELECT id FROM job_targets WHERE job_id=? ORDER BY id", (row["id"],))]
+            return {"status": row["status"], "receipt": row["id"],
+                    "affected_ids": original_targets, "idempotent_replay": True}
+
+    def payload(self, receipt: str) -> tuple[dict[str, Any], list[bytes]]:
+        root = self.spool / receipt
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        files = [(root / str(index)).read_bytes() for index in range(manifest.get("file_count", 0))]
+        return manifest, files
+
+    def prepared(self, receipt: str, head: str, result: dict[str, Any]) -> None:
+        with self._guard, self._connect() as db:
+            db.execute("UPDATE jobs SET prepared_head=?, prepared_result=? WHERE id=?",
+                       (head, json.dumps(result), receipt))
+
+    # BUG(medium): terminal jobs are never pruned, so the queue database grows without
+    # bound.
+    # Why valid: `finish` clears only `targets` (the live reservation table); `jobs` and
+    # `job_targets` rows are retained forever, and the `MAX_JOBS` guard counts only
+    # `queued`/`running` rows (`submit`), so no retention bound is ever enforced. The
+    # failure query in `progress` then scans `job_targets` once per failed job. The same
+    # method also risks the mirror image of its own cleanup: a crash between the UPDATE
+    # and the `rmtree` leaks a spool directory, and `__init__` only creates directories,
+    # so nothing sweeps it.
+    # Fix hint: delete or archive terminal rows past a bounded window while keeping the
+    # idempotency lookup answerable, and sweep orphaned spool directories at startup.
+    def finish(self, receipt: str, *, result: dict[str, Any] | None = None,
+               error: dict[str, Any] | None = None) -> None:
+        with self._guard, self._connect() as db:
+            db.execute("UPDATE jobs SET status=?, result=?, error=? WHERE id=?",
+                       ("failed" if error else "committed", json.dumps(result) if result else None,
+                        json.dumps(error) if error else None, receipt))
+            db.execute("DELETE FROM targets WHERE job_id=?", (receipt,))
+        shutil.rmtree(self.spool / receipt, ignore_errors=True)
+
+    def state(self, project: str, note_id: str) -> dict[str, Any] | None:
+        with self._guard, self._connect() as db:
+            row = db.execute(
+                "SELECT j.id, j.status, j.error FROM targets t JOIN jobs j ON j.id=t.job_id "
+                "WHERE t.project=? AND t.id=?", (project, note_id),
+            ).fetchone()
+            if row:
+                return {"status": "pending", "receipt": row["id"]}
+            row = db.execute(
+                "SELECT j.id, j.status, j.error FROM job_targets jt JOIN jobs j ON j.id=jt.job_id "
+                "WHERE jt.project=? AND jt.id=? ORDER BY j.seq DESC LIMIT 1",
+                (project, note_id),
+            ).fetchone()
+            if row and row["status"] == "failed":
+                return {"status": "failed", "receipt": row["id"],
+                        "error": json.loads(row["error"])}
+            return None
+
+    def pending_count(self, project: str | None = None) -> int:
+        with self._guard, self._connect() as db:
+            if project:
+                return db.execute("SELECT COUNT(*) FROM jobs WHERE project=? AND status IN ('queued','running')",
+                                  (project,)).fetchone()[0]
+            return db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+
+    def progress(self, through: int | None = None) -> dict[str, Any]:
+        """A finite barrier over jobs accepted before the first poll."""
+        with self._guard, self._connect() as db:
+            if through is None:
+                through = db.execute("SELECT COALESCE(MAX(seq), 0) FROM jobs").fetchone()[0]
+            pending = db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE seq<=? AND status IN ('queued','running')",
+                (through,),
+            ).fetchone()[0]
+            failed = [dict(row) for row in db.execute(
+                "SELECT j.id AS receipt, j.project, j.kind, j.error FROM jobs j "
+                "WHERE j.seq<=? AND j.status='failed' AND EXISTS ("
+                "SELECT 1 FROM job_targets jt WHERE jt.job_id=j.id AND NOT EXISTS ("
+                "SELECT 1 FROM job_targets later_target "
+                "JOIN jobs later ON later.id=later_target.job_id "
+                "WHERE later_target.project=jt.project AND later_target.id=jt.id "
+                "AND later.seq>j.seq AND later.seq<=? AND later.status='committed'"
+                ")) ORDER BY j.seq", (through, through),
+            )]
+            for row in failed:
+                row["error"] = json.loads(row["error"])
+            return {"through": through, "pending": pending, "failed": failed}

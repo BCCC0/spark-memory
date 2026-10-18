@@ -1,0 +1,42 @@
+# Line-ending and diff policy, pinned per repository.
+#
+# Why this file exists: without it, line endings are decided by each machine's
+# `core.autocrlf`, which is a global setting that differs between the two
+# clients we run. Windows git had `core.autocrlf=true` (system-wide) while WSL
+# git had it unset, so the SAME bytes were "clean" on one side and "every file
+# modified" on the other. A fresh checkout made by Windows git wrote CRLF, and
+# WSL git then read those CRLF bytes against an LF index and reported all 57
+# files changed. Pinning the policy here means the answer no longer depends on
+# whose machine you are sitting at.
+#
+# `text=auto` lets git detect text and normalise it to LF *in the repository*.
+# `eol=lf` makes the WORKING TREE LF on every platform too, so a file is
+# byte-identical on Windows and Linux and cross-platform hash comparisons are
+# meaningful. Python, YAML, TOML and Markdown are all LF-safe on Windows.
+* text=auto eol=lf
+
+# Explicit binary markers: never normalise, never diff as text. Nothing in the
+# current tree is binary, so these are here to keep a future asset from being
+# silently rewritten by the rule above.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.so    binary
+*.dll   binary
+*.exe   binary
+*.onnx  binary
+
+# Windows-only scripts, if any are ever added, keep CRLF so their own tooling
+# is happy; everything else in the repo is LF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf

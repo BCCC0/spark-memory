@@ -1,0 +1,4 @@
+kind        text
+head        abc
+text index  head=abc age=0s
+semantic    unavailable (not installed)

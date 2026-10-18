@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: client/go.mod
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+      - name: Check Python contract vectors
+        run: |
+          uv sync --extra dev --extra embed
+          uv run python tools/gen_client_vectors.py
+          uv run python tools/gen_client_help.py
+          git diff --exit-code -- client/testdata/vectors/rules.json client/internal/cli/help.json
+      - name: Test Go client
+        working-directory: client
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race ./...
+          go build -o bin/mem ./cmd/mem
+      - name: Run client acceptance tests against Go
+        run: |
+          MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem" uv run pytest tests -n 4 -k 'not python and not test_hook_splits_more_than_100_files_into_server_sized_batches'
+          MEM_TEST_CLIENT_BINARY="$PWD/client/bin/mem" uv run pytest tests/test_hooks.py::test_hook_splits_more_than_100_files_into_server_sized_batches -n 0
+      - name: Cross-build static clients
+        working-directory: client
+        run: |
+          for target in windows/amd64 linux/amd64 linux/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /tmp/mem-${target//\//-} ./cmd/mem
+          done
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --extra dev --extra embed --python ${{ matrix.python-version }}
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest
+      - name: Build package
+        run: uv build

@@ -1,0 +1,1087 @@
+{
+  "generator": "tools/gen_client_vectors.py",
+  "source_revision": "sha256:ca1de5daaf6efeb545bc58b21f66600ebbb963c4151fc299a965000336bb7106",
+  "error_table": {
+    "unauthorized": [
+      401,
+      8
+    ],
+    "device_exists": [
+      409,
+      8
+    ],
+    "server_unreachable": [
+      503,
+      2
+    ],
+    "lock_held": [
+      423,
+      3
+    ],
+    "lock_timeout": [
+      423,
+      3
+    ],
+    "target_busy": [
+      409,
+      3
+    ],
+    "queue_full": [
+      503,
+      3
+    ],
+    "queued_write_failed": [
+      409,
+      1
+    ],
+    "schema_invalid": [
+      422,
+      4
+    ],
+    "staging_diverged": [
+      409,
+      5
+    ],
+    "no_project": [
+      404,
+      6
+    ],
+    "stale_revision": [
+      412,
+      7
+    ],
+    "target_moved": [
+      410,
+      9
+    ],
+    "not_found": [
+      404,
+      9
+    ],
+    "invalid_request": [
+      400,
+      4
+    ],
+    "internal_error": [
+      500,
+      1
+    ],
+    "usage_error": [
+      400,
+      64
+    ]
+  },
+  "cases": [
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "PROJECT",
+      "expected": {
+        "ok": true,
+        "value": "PROJECT"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "empty id",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "alpha",
+      "expected": {
+        "ok": true,
+        "value": "alpha"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "ops/boot",
+      "expected": {
+        "ok": true,
+        "value": "ops/boot"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "foo.md",
+      "expected": {
+        "ok": true,
+        "value": "foo.md"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "a_b",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'a_b' is invalid: contains an underscore",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "A",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'A' is invalid: contains uppercase (ids are lowercase)",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "Ä",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'Ä' is invalid: contains uppercase (ids are lowercase)",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "a bC",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'a bC' is invalid: contains uppercase (ids are lowercase)",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "../x",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "directory may not be '..'",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": ".hidden",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename may not start/end with a dot or contain '..'",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "a//b",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "empty directory",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "a—b",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'a—b' is invalid: contains an em dash — (use a plain '-')",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": {
+        "ok": true,
+        "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' is 81 chars; the limit is 80",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/file",
+      "expected": {
+        "ok": true,
+        "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/file"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/file",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "directory 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' is 41 chars; the limit is 40",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename '界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界' is invalid: contains '界', which is not allowed",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "😀",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename '😀' is invalid: contains '😀', which is not allowed",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "á",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'á' is invalid: contains '́', which is not allowed",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "\\ops\\boot\\",
+      "expected": {
+        "ok": true,
+        "value": "ops/boot"
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "one two",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "filename 'one two' is invalid: contains a space",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "id",
+      "role": "contract",
+      "input": "d--e",
+      "expected": {
+        "ok": true,
+        "value": "d--e"
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "proj",
+      "expected": {
+        "ok": true,
+        "value": "proj"
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "missing project",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "Mixed",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "project name 'Mixed' is invalid: contains uppercase (ids are lowercase)",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "two words",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "project name 'two words' is invalid: contains a space",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": {
+        "ok": true,
+        "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "project name 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' is 41 chars; the limit is 40",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "project",
+      "role": "contract",
+      "input": "a/b",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "project 'a/b' must be a single name",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@file(laptop:C:\\src\\x)",
+      "expected": {
+        "ok": true,
+        "value": "@file(laptop:C:\\src\\x)"
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@dir(home:/docs)",
+      "expected": {
+        "ok": true,
+        "value": "@dir(home:/docs)"
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@locked(home:/secret)",
+      "expected": {
+        "ok": true,
+        "value": "@locked(home:/secret)"
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@file(self:/a)",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'self' is only valid inside a device home; project pointers need an enrolled alias",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@file(no_alias:/a)",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "invalid device alias 'no_alias'",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@file(home:)",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "pointer must use @file(alias:path), @dir(alias:path), or @locked(alias:path)",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "pointer",
+      "role": "contract",
+      "input": "@file(home:/a)b)",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "pointer path must be a non-empty single line without ')'",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: hello\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "hello"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: yes\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: no\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: on\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: off\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: y\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "y"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: n\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "n"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: true\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: 123\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: ~\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: yEs\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "yEs"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: oN\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "oN"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: oFf\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "oFf"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: Yes\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: OFF\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: \"yes\"\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "yes"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: 'on'\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "on"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: !!str yes\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "yes"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: !!str on\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "on"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: !!bool yes\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is required and must be a non-empty string",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: 第一行\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "第一行"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: |\n  a\n  b\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' must not contain a newline",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n---\nbody\n",
+      "expected": {
+        "ok": false,
+        "code": "schema_invalid",
+        "message": "'summary' is 201 chars; the limit is 200",
+        "detail": {}
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: áááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááá\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "áááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááááá"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: &a hello\nsummary: *a\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "hello"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: &a hello\nsummary: *a\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "hello"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\ndefaults: &d\n  summary: merged\n<<: *d\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "merged"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\ndefaults: &d\n  summary: merged\n<<: *d\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "merged"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\ndefaults: &d\n  summary: merged\n<<: *d\nsummary: explicit\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "explicit"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\ndefaults: &d\n  summary: merged\n<<: *d\nsummary: explicit\n---\nbody\n",
+      "expected": {
+        "ok": true,
+        "value": "explicit"
+      }
+    },
+    {
+      "kind": "summary",
+      "role": "contract",
+      "input": "---\nsummary: first\nsummary: last\n---\n",
+      "expected": {
+        "ok": true,
+        "value": "last"
+      }
+    },
+    {
+      "kind": "add_key",
+      "role": "port-oracle",
+      "input": [
+        "abc",
+        "n",
+        "",
+        "",
+        ""
+      ],
+      "expected": "abc:n::6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d:add"
+    },
+    {
+      "kind": "rm_key",
+      "role": "port-oracle",
+      "input": [
+        "n",
+        "",
+        ""
+      ],
+      "expected": "n::e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:rm"
+    },
+    {
+      "kind": "mv_key",
+      "role": "port-oracle",
+      "input": [
+        "n",
+        "dest",
+        "",
+        ""
+      ],
+      "expected": "n:dest::e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:mv"
+    },
+    {
+      "kind": "add_key",
+      "role": "port-oracle",
+      "input": [
+        "abc",
+        "n",
+        "rev",
+        "D:/x",
+        "change"
+      ],
+      "expected": "abc:n:rev:e18f0aa3b63815d4a09429a0a882815b596c170a0d1af8af28b48af480147167:add"
+    },
+    {
+      "kind": "rm_key",
+      "role": "port-oracle",
+      "input": [
+        "n",
+        "rev",
+        "change"
+      ],
+      "expected": "n:rev:12ea12eace7d655f471ce55e34f89b1b77a3d9d05a445ca82877dd2235beaa51:rm"
+    },
+    {
+      "kind": "mv_key",
+      "role": "port-oracle",
+      "input": [
+        "n",
+        "dest",
+        "rev",
+        "change"
+      ],
+      "expected": "n:dest:rev:12ea12eace7d655f471ce55e34f89b1b77a3d9d05a445ca82877dd2235beaa51:mv"
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "/mnt/d/src/x.md",
+      "expected": {
+        "windows": "D:\\src\\x.md",
+        "wsl": "/mnt/d/src/x.md"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "/mnt/c",
+      "expected": {
+        "windows": "C:\\",
+        "wsl": "/mnt/c"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "/mnt/e/",
+      "expected": {
+        "windows": "E:\\",
+        "wsl": "/mnt/e/"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "D:\\src\\x.md",
+      "expected": {
+        "windows": "D:\\src\\x.md",
+        "wsl": "/mnt/d/src/x.md"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "C:/Work/a.md",
+      "expected": {
+        "windows": "C:\\Work\\a.md",
+        "wsl": "/mnt/c/Work/a.md"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "relative/x",
+      "expected": {
+        "windows": null,
+        "wsl": null
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "/home/x",
+      "expected": {
+        "windows": null,
+        "wsl": null
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "d:",
+      "expected": {
+        "windows": "d:",
+        "wsl": "/mnt/d"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "D:relative",
+      "expected": {
+        "windows": null,
+        "wsl": null
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "d:foo",
+      "expected": {
+        "windows": null,
+        "wsl": null
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "C:/a//b",
+      "expected": {
+        "windows": "C:\\a\\b",
+        "wsl": "/mnt/c/a/b"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "C:/a/./b",
+      "expected": {
+        "windows": "C:\\a\\b",
+        "wsl": "/mnt/c/a/b"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "C:/a/../b",
+      "expected": {
+        "windows": "C:\\a\\..\\b",
+        "wsl": "/mnt/c/a/../b"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "\\mnt\\d\\x",
+      "expected": {
+        "windows": "D:\\x",
+        "wsl": "/mnt/d/x"
+      }
+    },
+    {
+      "kind": "path",
+      "role": "port-oracle",
+      "input": "/mnt/d/src/界 note.md",
+      "expected": {
+        "windows": "D:\\src\\界 note.md",
+        "wsl": "/mnt/d/src/界 note.md"
+      }
+    },
+    {
+      "kind": "from_path",
+      "role": "port-oracle",
+      "input": "ops\\boot.md",
+      "expected": "ops/boot"
+    },
+    {
+      "kind": "from_path",
+      "role": "port-oracle",
+      "input": "./notes/a.MD",
+      "expected": "notes/a"
+    },
+    {
+      "kind": "from_path",
+      "role": "port-oracle",
+      "input": "plain",
+      "expected": "plain"
+    },
+    {
+      "kind": "from_path",
+      "role": "port-oracle",
+      "input": "Ä.md",
+      "expected": "Ä"
+    },
+    {
+      "kind": "from_path",
+      "role": "port-oracle",
+      "input": "a b.md",
+      "expected": "a b"
+    },
+    {
+      "kind": "marker",
+      "role": "port-oracle",
+      "input": "project = 'p'\nserver = 'http://x'\n",
+      "expected": {
+        "ok": true,
+        "value": {
+          "project": "p",
+          "server": "http://x",
+          "patterns": []
+        }
+      }
+    },
+    {
+      "kind": "marker",
+      "role": "port-oracle",
+      "input": "project = 'p'\n[track]\npatterns = ['*.md', '!drafts/**']\n",
+      "expected": {
+        "ok": true,
+        "value": {
+          "project": "p",
+          "server": "",
+          "patterns": [
+            "*.md",
+            "!drafts/**"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "marker",
+      "role": "port-oracle",
+      "input": "project = 'p'\n[track]\npatterns = '*.md'\n",
+      "expected": {
+        "ok": true,
+        "value": {
+          "project": "p",
+          "server": "",
+          "patterns": [
+            "*.md"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "marker",
+      "role": "port-oracle",
+      "input": "project = 'p'\n[track]\npatterns = [1, '*.md']\n",
+      "expected": {
+        "ok": true,
+        "value": {
+          "project": "p",
+          "server": "",
+          "patterns": [
+            "1",
+            "*.md"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "marker",
+      "role": "port-oracle",
+      "input": "project = 'p'\nproject = 'q'\n",
+      "expected": {
+        "ok": false,
+        "code": "invalid_request"
+      }
+    },
+    {
+      "kind": "marker",
+      "role": "port-oracle",
+      "input": "[track]\npatterns = [\n",
+      "expected": {
+        "ok": false,
+        "code": "invalid_request"
+      }
+    }
+  ]
+}

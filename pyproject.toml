@@ -1,0 +1,56 @@
+[project]
+name = "spark-memory"
+version = "0.1.0"
+description = "mem — a server-owned project memory service"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name = "BCCC0"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+urls = {Homepage = "https://github.com/BCCC0/spark-memory", Issues = "https://github.com/BCCC0/spark-memory/issues"}
+dependencies = [
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "pytest-xdist>=3.6"]
+# The semantic index. Also optional: without it `search` is FTS5-only, which is a
+# useful service, and `--mode hybrid` is refused rather than silently downgraded.
+embed = ["fastembed>=0.8", "sqlite-vec>=0.1.6"]
+
+[project.scripts]
+mem = "mem.cli:main"
+memd = "mem.server.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The default suite is deterministic and fast. Real ONNX/model coverage is an
+# explicit job (`pytest -m real_embedder`) so ordinary development never starts
+# the embedding model or contends on its cache.
+addopts = "-q -n 4 --durations=20 -m 'not real_embedder'"
+# A test that hangs must fail with a stack dump rather than stalling the run until
+# CI's own timeout kills it. `thread` is what makes the dump possible, and it is the
+# only method that can interrupt a test blocked in a thread or on a socket.
+timeout = 120
+timeout_method = "thread"
+markers = [
+    "real_embedder: needs the real fastembed model; the autouse fake embedder stands down",
+]

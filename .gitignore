@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+# pytest's tmp_path base directory, created next to the project when it runs
+pytest-of-*/
+# scratch dirs from ad-hoc diagnostic scripts
+tmp*/
+.demo/
+.pytmp/
+.t3/
+.uvcache/
+fastembed_cache/
+dist/
+client/bin/
+build/
+*.egg-info/
+.env
+.env.*
+# The per-checkout mem client dir (config.toml + credentials). `credentials` and
+# `.mem.toml` are ignored individually below; this keeps the whole directory out
+# so a client config can never be committed by accident.
+.mem-client/
+.mem.toml
+credentials
+*.secret
+*.token
+*.log
+deploy_manifest
+deployment/
+issue/
+tools/mcp_auth_probe/
