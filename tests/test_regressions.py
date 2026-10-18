@@ -399,8 +399,9 @@ def test_concurrent_expect_writes_allow_exactly_one(ready):
 
     With the compare-and-swap checked *outside* the write lock, both clients can
     read the same pre-write hash, both pass the check, and both apply — the lost
-    update invariant C7 exists to prevent. With the check inside the lock this is
-    deterministic: the loser sees a changed hash and exits 7.
+    update invariant C7 exists to prevent. The loser is refused either before the
+    winner commits (the target is busy, exit 3) or after it (the hash changed, exit
+    7); both are safe refusals, and which one wins the race is not the invariant.
     """
     ready.write("race.md", note_text(summary="original"))
     ready.cli_json("add", "race.md", "--as", "race")
@@ -421,8 +422,10 @@ def test_concurrent_expect_writes_allow_exactly_one(ready):
     for thread in threads:
         thread.join(timeout=60)
 
-    assert sorted(results.values()) == [0, 3], (
-        f"exactly one concurrent --expect write must win: {results}"
+    outcomes = sorted(results.values())
+    assert outcomes[0] == 0, f"exactly one concurrent --expect write must win: {results}"
+    assert outcomes[1] in (3, 7), (
+        f"the loser must be refused as busy or stale, not accepted: {results}"
     )
 
 
