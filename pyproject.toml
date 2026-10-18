@@ -27,7 +27,7 @@ dependencies = [
 dev = ["pytest>=8", "pytest-timeout>=2.3", "pytest-xdist>=3.6"]
 # The semantic index. Also optional: without it `search` is FTS5-only, which is a
 # useful service, and `--mode hybrid` is refused rather than silently downgraded.
-embed = ["fastembed>=0.8", "sqlite-vec>=0.1.6"]
+embed = ["fastembed>=0.8", "sqlite-vec>=0.1.9"]
 
 [project.scripts]
 mem = "mem.cli:main"
