@@ -28,6 +28,30 @@ def test_a_writer_does_not_exclude_a_reader(tmp_path):
             assert reader.execute("SELECT COUNT(*) FROM meta").fetchone()[0] >= 0
         writer.rollback()
 
+def test_switching_fts_availability_clears_both_tables(tmp_path):
+    """A DB built with FTS5 then opened without it must not keep stale rows."""
+    index = SearchIndex(tmp_path / "search.db")
+    with index._connect() as conn:
+        conn.execute(
+            "INSERT INTO docs(note_id, project, path, status, note_type, tags,"
+            " title, summary, body) VALUES ('d','p','projects/p/d.md','','','[]','','','')"
+        )
+        conn.execute(
+            "INSERT INTO notes(note_id, project, path, status, note_type, tags,"
+            " title, summary, body) VALUES ('n','p','projects/p/n.md','','','[]','','','')"
+        )
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('mode', 'docs')")
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('head', 'old')")
+
+    index._connect_and_prepare()
+
+    with index._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 0
+        assert conn.execute("SELECT value FROM meta WHERE key='head'").fetchone()[0] == ""
+        assert conn.execute("SELECT value FROM meta WHERE key='mode'").fetchone()[0] == "fts"
+
+
 # -- the strict renderer -------------------------------------------------------
 
 

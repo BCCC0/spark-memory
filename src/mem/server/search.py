@@ -123,6 +123,30 @@ class SearchIndex:
         conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
+    @staticmethod
+    def _tables(conn: sqlite3.Connection) -> set[str]:
+        return {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE name IN ('notes', 'docs')"
+            )
+        }
+
+    @classmethod
+    def _clear_tables(cls, conn: sqlite3.Connection) -> None:
+        for table in ("notes", "docs"):
+            if table in cls._tables(conn):
+                conn.execute(f"DELETE FROM {table}")
+
+    @classmethod
+    def _delete_paths(cls, conn: sqlite3.Connection, paths: list[str]) -> None:
+        for table in ("notes", "docs"):
+            if table in cls._tables(conn):
+                conn.executemany(
+                    f"DELETE FROM {table} WHERE path=?",
+                    [(path,) for path in paths],
+                )
+
     def _connect_and_prepare(self) -> None:
         with self._connect() as conn:
             try:
@@ -140,6 +164,21 @@ class SearchIndex:
                     );
                     """
                 )
+            mode = "fts" if self._fts else "docs"
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'mode'"
+            ).fetchone()
+            previous = row["value"] if row else None
+            if previous is not None and previous != mode:
+                # A DB opened on a build with a different FTS5 availability must
+                # not keep rows in the other table while head already matches.
+                self._clear_tables(conn)
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('head', '')"
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('mode', ?)", (mode,)
+            )
 
     def _prepare_if_needed(self) -> None:
         """Recreate the schema if the index file went away underneath us.
@@ -248,7 +287,7 @@ class SearchIndex:
         ]
         with self._connect() as conn:
             target = "notes" if self._fts else "docs"
-            conn.execute(f"DELETE FROM {target}")
+            self._clear_tables(conn)
             conn.executemany(
                 f"INSERT INTO {target}(note_id, project, path, status, note_type,"
                 " tags, title, summary, body) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -269,10 +308,7 @@ class SearchIndex:
                     rows.append(row)
         with self._connect() as conn:
             target = "notes" if self._fts else "docs"
-            conn.executemany(
-                f"DELETE FROM {target} WHERE path=?",
-                [(path,) for path in paths],
-            )
+            self._delete_paths(conn, paths)
             conn.executemany(
                 f"INSERT INTO {target}(note_id, project, path, status, note_type,"
                 " tags, title, summary, body) VALUES (?,?,?,?,?,?,?,?,?)",
