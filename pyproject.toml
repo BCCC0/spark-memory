@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2.3", "pytest-xdist>=3.6"]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "pytest-xdist>=3.8.0"]
 # The semantic index. Also optional: without it `search` is FTS5-only, which is a
 # useful service, and `--mode hybrid` is refused rather than silently downgraded.
 embed = ["fastembed>=0.8", "sqlite-vec>=0.1.6"]
