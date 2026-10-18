@@ -155,6 +155,52 @@ def test_hook_verbs_refuse_a_non_repository(tmp_path):
 # -- capture ---------------------------------------------------------------
 
 
+def test_hook_update_uses_the_repo_marker_from_a_markerless_cwd(ready, tracked):
+    """`--repo` must supply the project; the caller's cwd need not be a project."""
+    ready.cli_json("hook", "add", "*.md", cwd=tracked)
+    (tracked / "outside.md").write_text(NOTE, encoding="utf-8", newline="\n")
+    _commit(tracked, "add outside")
+
+    markerless = ready.tmp / "markerless"
+    markerless.mkdir()
+    result = ready.cli_json(
+        "hook", "update", "--repo", str(tracked), cwd=markerless
+    )
+    assert result["added"] == ["outside.md"], result
+    assert ready.cli_json("read", "outside", cwd=tracked)["id"] == "outside"
+
+
+def test_hook_update_refuses_a_different_cwd_project(ready, tracked, tmp_path):
+    ready.cli_json("hook", "add", "*.md", cwd=tracked)
+    (tracked / "note.md").write_text(NOTE, encoding="utf-8", newline="\n")
+    _commit(tracked)
+
+    other = tmp_path / "other-project"
+    other.mkdir()
+    (other / ".mem.toml").write_text('project = "other"\n', encoding="utf-8")
+
+    failed = ready.cli("hook", "update", "--repo", str(tracked), cwd=other)
+    assert failed.returncode == 4, failed.stderr
+    payload = json.loads(failed.stderr)
+    assert payload["error"]["code"] == "invalid_request"
+    assert "different project" in payload["error"]["message"]
+
+
+def test_hook_check_uses_the_repo_marker_from_a_markerless_cwd(ready, tracked):
+    ready.cli_json("hook", "add", "docs/*.md", cwd=tracked)
+    _commit(tracked, "baseline")
+    (tracked / "docs").mkdir()
+    (tracked / "docs" / "guide.md").write_text(NOTE, encoding="utf-8")
+    _git(tracked, "add", "docs/guide.md")
+
+    markerless = ready.tmp / "markerless-check"
+    markerless.mkdir()
+    result = ready.cli_json(
+        "hook", "check", "--repo", str(tracked), cwd=markerless
+    )
+    assert result["checked"] == ["docs/guide.md"], result
+
+
 def test_captures_a_committed_markdown_file_as_a_note(ready, tracked):
     ready.cli_json("hook", "add", "*.md", cwd=tracked)
     (tracked / "note.md").write_text(NOTE, encoding="utf-8", newline="\n")

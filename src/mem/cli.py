@@ -1466,12 +1466,31 @@ def _hook_repo(args: argparse.Namespace) -> Path:
     return root
 
 
+def _marker_for_repo(repo: Path) -> tuple[Path, dict[str, Any]] | None:
+    """The marker that owns *repo*, with the same containment rule as Go."""
+    marker = cfg.find_marker(repo)
+    if marker is None:
+        return None
+    marker_path, data = marker
+    root = marker_path.parent.resolve()
+    try:
+        repo.resolve().relative_to(root)
+    except ValueError as exc:
+        raise MemError(
+            "invalid_request",
+            f"{repo} is outside the project root {root}; "
+            "run `mem init` in this repository to track it separately",
+            {"repo": str(repo), "project_root": str(root)},
+        ) from exc
+    return marker_path, data
+
+
 def _hook_check(args: argparse.Namespace) -> int:
     """Validate the staged blobs that an opted-in repository is about to commit."""
     from .summary import parse_frontmatter, validate_summary
 
     repo = _hook_repo(args)
-    marker = cfg.find_marker(repo)
+    marker = _marker_for_repo(repo)
     patterns = cfg.read_marker_patterns(marker[0]) if marker else []
     if not patterns:
         emit({"checked": [], "errors": []}, human="no files selected by mem hook", as_human=args.human)
@@ -1504,19 +1523,6 @@ def _hook_check(args: argparse.Namespace) -> int:
     return 0
 
 
-# BUG(high): the tracked patterns come from the --repo marker, but project and
-# credentials come from the marker found by walking up from the current
-# directory, so the two can disagree.
-# Why valid: cfg.load() resolves from cwd while patterns come from
-# cfg.find_marker(repo); run from a marker-less cwd the verb reads the repo's
-# patterns then reports "not enrolled in a project here", and run from inside a
-# different project's tree it silently uploads repo X's files into project Y --
-# the containment guard below (which requires repo to resolve under
-# marker_path.parent) uses the repo's marker so it cannot catch the mismatch,
-# and _hook_check uses the repo marker, so the two verbs disagree about which
-# project is authoritative.
-# Fix hint: derive the project from the --repo marker for both verbs, and refuse
-# with a typed error when the cwd marker names a different project.
 def _hook_update(args: argparse.Namespace) -> int:
     """Capture every tracked path committed since the last capture.
 
@@ -1525,14 +1531,9 @@ def _hook_update(args: argparse.Namespace) -> int:
     ``mem-hook.log`` in the git dir, which is where a human would look.
     """
     repo = _hook_repo(args)
-    config = cfg.load(require_project=False, require_auth=False)
-    marker = cfg.find_marker(repo) or cfg.find_marker()
-    marker_path = marker[0] if marker else None
-    patterns = cfg.read_marker_patterns(marker_path) if marker_path else []
-
     result: dict[str, Any] = {
         "repo": str(repo),
-        "patterns": len(patterns),
+        "patterns": 0,
         "added": [],
         "receipts": [],
         "skipped": [],
@@ -1540,30 +1541,44 @@ def _hook_update(args: argparse.Namespace) -> int:
         "errors": [],
         "dry_run": bool(args.dry_run),
     }
+    try:
+        marker = _marker_for_repo(repo)
+    except MemError as exc:
+        result["errors"].append(exc.message)
+        _log_hook(repo, result["errors"])
+        emit(result, as_human=args.human)
+        return 0
+
+    marker_path = marker[0] if marker else None
+    patterns = cfg.read_marker_patterns(marker_path) if marker_path else []
+    result["patterns"] = len(patterns)
     if not patterns:
         # Nothing declared is not an error: the hook may be installed repo-wide.
         emit(result, human="no patterns declared; nothing to do", as_human=args.human)
         return 0
+
+    config = cfg.load(require_project=False, require_auth=False)
+    if marker is not None:
+        marker_path, marker_data = marker
+        cwd_marker = cfg.find_marker()
+        cwd_project = cwd_marker[1].get("project") if cwd_marker else None
+        repo_project = marker_data.get("project")
+        if cwd_project and repo_project and cwd_project != repo_project:
+            raise MemError(
+                "invalid_request",
+                "current directory belongs to a different project than --repo",
+                {"repo_project": repo_project, "cwd_project": cwd_project},
+            )
+        config.project = repo_project
+        config.marker_path = marker_path
+        if marker_data.get("server"):
+            config.server = str(marker_data["server"])
+
     if not config.project or not config.credentials:
         result["errors"].append("not enrolled in a project here; run `mem login` and `mem init`")
         _log_hook(repo, result["errors"])
         emit(result, as_human=args.human)
         return 0
-
-    # Ids are derived relative to the marker, so a repository the marker does not
-    # contain cannot yield one. Saying so once beats one failure per file.
-    if marker_path is not None:
-        root = marker_path.parent.resolve()
-        try:
-            repo.resolve().relative_to(root)
-        except ValueError:
-            result["errors"].append(
-                f"{repo} is outside the project root {root}; "
-                "run `mem init` in this repository to track it separately"
-            )
-            _log_hook(repo, result["errors"])
-            emit(result, as_human=args.human)
-            return 0
 
     rev = args.rev or _head_rev(repo)
     if not rev:
