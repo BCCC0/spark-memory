@@ -749,6 +749,7 @@ def list_records(
     cursor: str | None = None,
     full: bool = False,
     alias_for_device: Any = None,
+    caller_device_id: str | None = None,
 ) -> dict[str, Any]:
     cutoff = None
     seconds = _since_seconds(since)
@@ -816,6 +817,30 @@ def list_records(
             "warnings": warnings,
         }
         if full:
+            origin_record: dict[str, Any] | None = None
+            if isinstance(data.get("origin"), dict):
+                origin = data["origin"]
+                origin_record = {"device": origin.get("device")}
+                origin_path = origin.get("path")
+                if (
+                    origin_path
+                    and caller_device_id
+                    and str(origin.get("device") or "") == caller_device_id
+                    and _looks_like_location(str(origin_path))
+                ):
+                    # The caller's own path is directly actionable and does not
+                    # depend on the device having an alias. Other devices only get
+                    # the alias-qualified pointer below.
+                    origin_record["path"] = str(origin_path)
+                elif (
+                    origin_path
+                    and alias_for_device
+                    and (Path(str(origin_path)).is_absolute()
+                         or PureWindowsPath(str(origin_path)).is_absolute())
+                ):
+                    author_alias = alias_for_device(str(origin.get("device") or ""))
+                    if author_alias:
+                        origin_record["pointer"] = f"@file({author_alias}:{origin_path})"
             record.update(
                 {
                     "project": meta.project,
@@ -823,16 +848,7 @@ def list_records(
                     "created": meta.created,
                     "author": meta.author,
                     "message": meta.message,
-                    "origin": ({
-                        "device": data.get("origin", {}).get("device"),
-                        **({"pointer": f"@file({alias_for_device(str(data['origin'].get('device') or ''))}:{data['origin'].get('path')})"}
-                           if alias_for_device and isinstance(data.get("origin"), dict)
-                           and data["origin"].get("path")
-                           and alias_for_device(str(data["origin"].get("device") or ""))
-                           and (Path(str(data["origin"].get("path"))).is_absolute()
-                                or PureWindowsPath(str(data["origin"].get("path"))).is_absolute())
-                           else {})
-                    } if isinstance(data.get("origin"), dict) else None),
+                    "origin": origin_record,
                     "sha256": repo.sha256_bytes(raw),
                     "bytes": len(raw),
                 }
@@ -1155,6 +1171,7 @@ def create_app(settings: Settings) -> Starlette:
             cursor=params.get("cursor"),
             full=(params.get("full") or "").lower() in {"1", "true", "yes"},
             alias_for_device=registry.alias_for,
+            caller_device_id=request.state.device["device_id"],
         )
         return JSONResponse(payload)
 

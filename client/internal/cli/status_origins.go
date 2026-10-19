@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -53,16 +54,19 @@ func auditOrigins(c config.Config, cl *transport.Client) (map[string]any, error)
 			continue
 		}
 		pointer := stringField(origin, "pointer")
-		if pointer == "" {
+		path := stringField(origin, "path")
+		if pointer == "" && path == "" {
 			entries = append(entries, map[string]any{"id": stringField(row, "id"), "state": "unresolved"})
 			continue
 		}
-		parsed, err := pointers.Parse(pointer, false, "")
-		if err != nil {
-			entries = append(entries, map[string]any{"id": stringField(row, "id"), "state": "unresolved"})
-			continue
+		if path == "" {
+			parsed, err := pointers.Parse(pointer, false, "")
+			if err != nil {
+				entries = append(entries, map[string]any{"id": stringField(row, "id"), "state": "unresolved"})
+				continue
+			}
+			path = parsed.Path
 		}
-		path := parsed.Path
 		key := path
 		if runtime.GOOS == "windows" {
 			key = strings.ToLower(path)
@@ -97,6 +101,13 @@ func auditOrigins(c config.Config, cl *transport.Client) (map[string]any, error)
 }
 
 func originsHuman(value map[string]any) string {
+	if counts, ok := value["counts"].(map[string]int); ok {
+		parts := []string{}
+		for _, name := range []string{"ok", "missing", "outside_root", "cross_project", "ambiguous", "remote", "unresolved"} {
+			parts = append(parts, fmt.Sprintf("%s %d", name, counts[name]))
+		}
+		return strings.Join(parts, ", ")
+	}
 	counts := object(value["counts"])
 	parts := []string{}
 	for _, name := range []string{"ok", "missing", "outside_root", "cross_project", "ambiguous", "remote", "unresolved"} {

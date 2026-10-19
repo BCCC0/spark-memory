@@ -665,11 +665,12 @@ def _audit_origins(config: cfg.ClientConfig, client: Client) -> dict[str, Any]:
             entries.append({"id": row["id"], "state": "remote"})
             continue
         pointer = origin.get("pointer")
-        if not pointer:
+        path_value = origin.get("path")
+        if not path_value and not pointer:
             entries.append({"id": row["id"], "state": "unresolved"})
             continue
         try:
-            path = Path(parse_pointer(pointer).path)
+            path = Path(str(path_value)) if path_value else Path(parse_pointer(str(pointer)).path)
         except Exception:
             entries.append({"id": row["id"], "state": "unresolved"})
             continue
@@ -1521,11 +1522,15 @@ def cmd_pull(args: argparse.Namespace) -> int:
         origin = row.get("origin") or {}
         if not requested and origin.get("device") != own_device:
             continue
-        if origin.get("device") != own_device or not origin.get("pointer"):
+        pointer = origin.get("path") or origin.get("pointer")
+        if origin.get("device") != own_device or not pointer:
             damaged.append({"id": note_id, "reason": "missing_origin"})
             continue
         try:
-            target = Path(parse_pointer(str(origin["pointer"])).path).expanduser()
+            if origin.get("path"):
+                target = Path(str(origin["path"])).expanduser()
+            else:
+                target = Path(parse_pointer(str(origin["pointer"])).path).expanduser()
             resolved = target.resolve(strict=False)
         except Exception:
             damaged.append({"id": note_id, "reason": "missing_origin"})
