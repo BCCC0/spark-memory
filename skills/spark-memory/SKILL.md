@@ -58,29 +58,30 @@ mem read ops/boot ops/recovery              # ordered records for several IDs
 - Use `--outline` to decide whether a large note is worth reading.
 - `mem read <id>@<revision>` pins a specific revision when you need what was
   true at the time.
-- A truncated read tells you **which copy is fresh**, because the working file and
-  the committed revision routinely differ and either may be newer:
+- A read tells you **which copy is fresh**, because the working file and the
+  committed revision routinely differ and either may be newer. This applies to
+  small notes and slices too, not only handoffs:
   - `local_file`: `true` when a working file was offered and compared, `false`
     when none was. **Read this first** — without it, a `source` value is
     ambiguous.
   - `source`: `local` (your working file is newer), `server` (the committed
-    revision is newer), `same` (identical substance), or `none` (**no local file
+    revision is newer), `same` (identical prose), or `none` (**no local file
     exists or it could not be resolved** — this is not a statement that the
     committed revision is newer). `none` is also what you get when another device
     committed the note.
-  - `body_sha256` / `body_matches`: the committed body's hash and whether your
-    file matches it. Compare on the **body**: the server owns the frontmatter and
-    rewrites it on upload, so whole-file hashes always differ, even for a note you
-    never edited. `body_matches` is about the body only — a frontmatter-only edit
-    (summary, status, tags) is invisible to it, and the `summary`/`status`/`tags`
-    in the payload are the **server's** values, not your file's.
+  - `body_matches`: whether your working file's **prose body** matches the
+    committed body. Compare on the body: the server owns the frontmatter and
+    rewrites it on upload, so whole-file hashes always differ, even for a note
+    you never edited. A frontmatter-only edit (summary, status, tags) is
+    invisible to it, and the `summary`/`status`/`tags` in the payload are the
+    **server's** values, not your file's. A slice reports this for the whole
+    file, not for the returned fragment.
   - `timestamp_basis` appears **only** when an mtime comparison actually ran, and
     only means the ordering is wall-clock based — a skewed clock can invert it.
-  - `fetch_url` + `content_sha256`: always present on a truncated read, so the
-    committed revision is reachable either way. `content_sha256` is a whole-file
-    hash and will **never** equal your working file's — do not compare it to
-    decide freshness; use `body_sha256`. `fetch_url` is signed and short lived —
-    it is a credential, so do not paste it into notes or transcripts.
+  - `sha256` identifies the committed file and is what `mem add --expect` takes.
+    Do not compare it to your working file to decide freshness; use
+    `body_matches`. `fetch_url` is signed and short lived — it is a credential,
+    so do not paste it into notes or transcripts.
   - `origin_path` is where **this device** can open the file, not necessarily where
     the author uploaded it from (paths recorded by another OS are translated).
     Provenance requires fetching the raw file.
@@ -89,8 +90,17 @@ mem read ops/boot ops/recovery              # ordered records for several IDs
   - The same device reached from WSL and from Windows sees the same note; paths
     recorded by one OS are translated for the other, and an untranslatable path is
     dropped rather than guessed.
-  - A **section read** (`read <id>#<section>`) does not carry any of these fields:
-    it is a partial view, so ask for the whole note if you need to judge freshness.
+  - A **section read** (`read <id>#<section>`) reports freshness against the
+    whole note while returning only the section. It cannot be combined with
+    `--link-only`.
+  - `--link-only` omits the body even when it fits, returns `link_only: true`
+    and a signed `fetch_url`, and keeps the freshness fields. `truncated` still
+    reports the real cap result.
+
+When adding content, the authoring path must stay inside the project root
+(directory containing `.mem.toml`). An outside path is refused with
+`origin_outside_root`; copy it in, use `mem pointer add` for a reference, or use
+`--no-origin --as <id>` to store content without a local link.
 
 ## Following a repo automatically (only when the user asks)
 

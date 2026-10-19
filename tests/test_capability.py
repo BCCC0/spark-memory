@@ -155,7 +155,7 @@ def test_an_origin_device_read_carries_the_source_path(ready):
     assert "s=" in record["fetch_url"]
     # The client hashed the working file and decided which copy is fresh.
     assert record["source"] in {"local", "server", "same", "none"}
-    assert record["local_sha256"]
+    assert record["body_matches"] in {True, False}
     assert record["note_updated"], "freshness needs the commit time to compare against"
 
 
@@ -170,7 +170,8 @@ def test_a_remote_read_gets_no_local_path(ready):
     remote = _remote_record(ready)
     assert "origin_path" not in remote
     assert "s=" in remote["fetch_url"]
-    assert remote["content_sha256"], "the committed bytes are always identified"
+    assert remote["sha256"], "the committed bytes are always identified"
+    assert "content_sha256" not in remote, "sha256 is the only whole-file hash"
 
     local = build_record(MemoryRepo(ready.repo), "demo", "big", Settings(
         repo_root=ready.repo, devices_db=ready.tmp / "mem" / "devices.db",
@@ -179,7 +180,8 @@ def test_a_remote_read_gets_no_local_path(ready):
     ), caller_device_id=ready.cli_json("devices")[0]["device_id"])
     assert "origin_path" in local
     assert "fetch_url" in local, "the URL is no longer replaced by the path"
-    assert local["content_sha256"] == local["sha256"]
+    assert local["sha256"]
+    assert "content_sha256" not in local, "sha256 is the only whole-file hash"
     assert local["note_updated"]
 
 
@@ -194,3 +196,24 @@ def test_a_pinned_read_is_unsigned_and_needs_a_token(ready):
     assert "s=" not in uri, "a capability link covers the latest version only"
     assert _get(uri)[0] == 401
     assert _get(uri, ready.token())[0] == 200
+
+
+def test_an_inline_read_carries_freshness_without_a_fetch_url(ready):
+    """The cap decides whether a URL is needed, not whether freshness exists."""
+    ready.write("small.md", note_text(summary="small", body="short"))
+    ready.cli_json("add", "small.md", "--as", "small")
+    settings = Settings(
+        repo_root=ready.repo, devices_db=ready.tmp / "mem" / "devices.db",
+        enroll_secret=ready.secret_file, state_dir=ready.state,
+        base_url=ready.server, link_secret=ready.link_secret_file,
+    )
+    record = build_record(
+        MemoryRepo(ready.repo), "demo", "small", settings,
+        caller_device_id=ready.cli_json("devices")[0]["device_id"],
+    )
+    assert record["body"]
+    assert record["origin_path"].endswith("small.md")
+    assert record["body_sha256"]
+    assert record["note_updated"]
+    assert "fetch_url" not in record
+    assert "content_sha256" not in record

@@ -154,6 +154,9 @@ func addFiles(o options, c config.Config, cl *transport.Client) (any, string, er
 	if err := o.count(1, -1); err != nil {
 		return nil, "", err
 	}
+	if o.has("no-origin") && o.has("pointer") {
+		return nil, "", memerr.New("usage_error", "--no-origin applies to content uploads; a pointer never records an origin", nil)
+	}
 	if o.has("pointer") && len(o.positional) == 2 && strings.HasPrefix(o.positional[0], "@") {
 		fmt.Fprintln(os.Stderr, "mem: deprecated: use `mem pointer add EXPRESSION ID`")
 		if o.flag("from-git") != "" {
@@ -212,6 +215,15 @@ func addFiles(o options, c config.Config, cl *transport.Client) (any, string, er
 		if devicehome.IsDeviceHome(abs) {
 			return nil, "", memerr.New("invalid_request", "device-home files are private and cannot be added to project memory", nil)
 		}
+		ext := strings.ToLower(filepath.Ext(abs))
+		inline := !o.has("pointer") && allowed[ext]
+		origin := ""
+		if inline && !o.has("no-origin") {
+			origin, err = requireOriginInside(abs, base)
+			if err != nil {
+				return nil, "", err
+			}
+		}
 		id, err := derive(abs, base, o.flag("as"))
 		if err != nil {
 			return nil, "", err
@@ -220,9 +232,7 @@ func addFiles(o options, c config.Config, cl *transport.Client) (any, string, er
 			return nil, "", memerr.New("invalid_request", "duplicate id in batch: "+id, nil)
 		}
 		seen[id] = true
-		ext := strings.ToLower(filepath.Ext(abs))
-		inline := !o.has("pointer") && allowed[ext]
-		it := item{ID: id, Filename: filepath.Base(abs), Origin: abs}
+		it := item{ID: id, Filename: filepath.Base(abs), Origin: origin}
 		if inline {
 			if limit > 0 && info.Size() > limit {
 				return nil, "", memerr.New("invalid_request", abs+" exceeds the inline upload limit; use --pointer", nil)

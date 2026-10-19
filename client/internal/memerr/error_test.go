@@ -8,7 +8,7 @@ func TestEveryCodeHasHTTPAndExit(t *testing.T) {
 		"lock_held": 3, "lock_timeout": 3, "target_busy": 3, "queue_full": 3,
 		"queued_write_failed": 1, "schema_invalid": 4, "staging_diverged": 5,
 		"no_project": 6, "stale_revision": 7, "target_moved": 9, "not_found": 9,
-		"invalid_request": 4, "internal_error": 1, "usage_error": 64,
+		"invalid_request": 4, "origin_outside_root": 4, "internal_error": 1, "usage_error": 64,
 	}
 	if len(Table) != len(wantExit) {
 		t.Fatalf("table has %d codes, want %d", len(Table), len(wantExit))

@@ -18,10 +18,12 @@ reported as evidence only.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import time
+import urllib.request
 from pathlib import Path
+
+import pytest
 
 from conftest import note_text
 
@@ -30,10 +32,6 @@ def _aging(path: Path, *, seconds: float) -> None:
     """Backdate a file's mtime, so ordering is asserted without sleeping."""
     target = time.time() - seconds
     os.utime(path, (target, target))
-
-
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _edit(path: Path, text: str) -> None:
@@ -59,11 +57,13 @@ def test_a_working_file_newer_than_memory_is_named_as_the_fresh_copy(ready):
     record = ready.cli_json("read", "work")
     assert record["truncated"] is True, "a >threshold note is handed off, not inlined"
 
-    assert record["local_sha256"] == _sha(edited)
     assert record["source"] == "local", "the working file holds the newer bytes"
     assert record["body_matches"] is False
     assert Path(record["origin_path"]) == source
     assert record["note_updated"], "freshness needs the commit time to compare against"
+    assert "body_sha256" not in record
+    assert "local_sha256" not in record
+    assert "local_body_sha256" not in record
 
 
 def test_a_commit_newer_than_the_working_file_is_named_as_the_fresh_copy(ready):
@@ -99,16 +99,16 @@ def test_an_untouched_working_file_reports_same_despite_different_bytes(ready):
     ready.cli_json("add", "same.md", "--as", "same")
 
     record = ready.cli_json("read", "same")
-    assert record["body_sha256"], "the server identifies the committed body"
     assert record["body_matches"] is True, "the author changed nothing"
-    assert record["local_body_sha256"] == record["body_sha256"]
     assert record["source"] == "same"
     assert "timestamp_basis" not in record, (
         "no mtime comparison was performed, so no basis may be claimed"
     )
-    assert record["local_sha256"] == _sha(text)
-    # The whole-file hashes still differ, because the server rewrote frontmatter.
-    assert record["local_sha256"] != record["content_sha256"]
+    assert "body_sha256" not in record
+    assert "local_sha256" not in record
+    assert "local_body_sha256" not in record
+    # The whole-file hash is the committed identity, not a local comparison.
+    assert record["sha256"]
 
 
 def test_a_vanished_working_file_falls_back_to_the_committed_revision(ready):
@@ -183,3 +183,85 @@ def test_a_client_supplied_limit_is_attributed_to_the_client(ready):
     assert record["truncated"] is True
     assert record["deferred_by_client"] is True
     assert record["source"] in {"local", "server", "same", "none"}
+
+
+@pytest.mark.parametrize("body_bytes", [200, 3000])
+def test_a_note_under_the_cap_still_reports_freshness(ready, body_bytes):
+    """The inline cap must not gate the freshness metadata."""
+    text = note_text(summary=f"small-{body_bytes}", body="x" * body_bytes)
+    source = ready.write(f"small-{body_bytes}.md", text)
+    _edit(source, text)
+    ready.cli_json("add", f"small-{body_bytes}.md", "--as", f"small-{body_bytes}")
+
+    record = ready.cli_json("read", f"small-{body_bytes}")
+    assert record["body"], "a note under the cap is still inlined"
+    assert "fetch_url" not in record
+    assert Path(record["origin_path"]) == source
+    assert record["local_file"] is True
+    assert record["body_matches"] is True
+    assert record["source"] == "same"
+    assert record["note_updated"]
+    assert record["sha256"]
+    assert "body_sha256" not in record
+    assert "local_sha256" not in record
+
+
+def test_a_small_note_whose_working_file_vanishes_reports_none(ready):
+    source = ready.write("small-gone.md", note_text(summary="small-gone", body="short body"))
+    ready.cli_json("add", "small-gone.md", "--as", "small-gone")
+    source.unlink()
+
+    record = ready.cli_json("read", "small-gone")
+    assert record["body"], "the committed body is still available"
+    assert record["local_file"] is False
+    assert record["source"] == "none"
+    assert "origin_path" not in record
+    assert "body_matches" not in record
+
+
+def test_link_only_omits_an_small_body_without_claiming_truncation(ready):
+    source = ready.write("linked.md", note_text(summary="linked", body="a short body"))
+    _edit(source, note_text(summary="linked", body="a short body"))
+    ready.cli_json("add", "linked.md", "--as", "linked")
+
+    record = ready.cli_json("read", "linked", "--link-only")
+    assert "body" not in record
+    assert record["link_only"] is True
+    assert record["truncated"] is False, "the caller asked; the cap did not fire"
+    assert record["fetch_url"].startswith("http")
+    assert record["body_matches"] is True
+    assert Path(record["origin_path"]) == source
+    assert "deferred_by_client" not in record
+    with urllib.request.urlopen(record["fetch_url"], timeout=5) as response:
+        assert response.status == 200
+
+
+def test_link_only_on_a_large_note_still_reports_the_cap(ready):
+    ready.write("big-linked.md", note_text(summary="big-linked", body="y" * 9000))
+    ready.cli_json("add", "big-linked.md", "--as", "big-linked")
+
+    record = ready.cli_json("read", "big-linked", "--link-only")
+    assert "body" not in record
+    assert record["link_only"] is True
+    assert record["truncated"] is True
+    assert record["fetch_url"].startswith("http")
+    assert "body_matches" in record
+    assert "deferred_by_client" not in record, "the caller asked for no body"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("read", "linked:1-2", "--link-only"),
+        ("read", "linked#Heading", "--link-only"),
+        ("read", "linked#", "--link-only"),
+        ("read", "linked", "--outline", "--link-only"),
+    ],
+)
+def test_link_only_rejects_a_slice_or_outline(ready, args):
+    ready.write("linked.md", note_text(summary="linked", body="a short body"))
+    ready.cli_json("add", "linked.md", "--as", "linked")
+
+    result = ready.cli(*args)
+    assert result.returncode == 64, result.stderr
+    assert "link-only" in result.stderr

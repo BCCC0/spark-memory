@@ -140,6 +140,11 @@ def build_parser() -> _Parser:
     read.add_argument("ids", nargs="+", help="<id> or <id>@<revision>")
     read.add_argument("--revision")
     read.add_argument("--outline", action="store_true", help="headings only")
+    read.add_argument(
+        "--link-only",
+        action="store_true",
+        help="omit the whole note body and return a signed link plus freshness",
+    )
 
     devices = sub.add_parser("devices", parents=[common], help="list or retire devices")
     devices.add_argument("--retire", metavar="DEVICE_ID", help="retire a device")
@@ -150,6 +155,11 @@ def build_parser() -> _Parser:
     add.add_argument("files", nargs="+", help="files to track")
     add.add_argument("--pointer", action="store_true", help="track all files as pointers without reading their bytes")
     add.add_argument("--as", dest="as_id", help="explicit note id")
+    add.add_argument(
+        "--no-origin",
+        action="store_true",
+        help="store content without recording a local authoring path",
+    )
     add.add_argument("--expect", help="refuse unless the note's sha256 matches")
     add.add_argument(
         "--from-git",
@@ -398,15 +408,30 @@ def _freshness_line(record: dict[str, Any]) -> str:
     """One line for ``--human``: where the bytes are, and which side is newer."""
     source = record.get("source")
     if source == "local":
-        return f"working file is newer: {record.get('origin_path')}"
-    if source == "same":
-        return f"working file matches the committed revision: {record.get('origin_path')}"
-    if source == "server" and record.get("origin_path"):
-        return (
+        line = f"working file is newer: {record.get('origin_path')}"
+    elif source == "same":
+        line = f"working file matches the committed revision: {record.get('origin_path')}"
+    elif source == "server" and record.get("origin_path"):
+        line = (
             "committed revision is newer than your working file "
             f"({record['origin_path']}); fetch: {record.get('fetch_url', '')}"
         )
-    return f"fetch: {record.get('fetch_url', '')}"
+    else:
+        line = f"fetch: {record.get('fetch_url', '')}"
+    if record.get("link_only") and "fetch: " not in line and record.get("fetch_url"):
+        line += f"; link: {record['fetch_url']}"
+    return line
+
+
+def _strip_freshness_hashes(record: dict[str, Any]) -> None:
+    """Keep the comparison result, not its inputs.
+
+    ``sha256`` stays: it identifies the committed file and is the value
+    ``--expect`` takes. ``body_sha256`` and the local hashes are implementation
+    detail behind ``body_matches``.
+    """
+    for key in ("body_sha256", "content_sha256", "local_sha256", "local_body_sha256"):
+        record.pop(key, None)
 
 
 def _derive_id(path: Path, as_id: str | None, *, base: Path | None = None) -> str:
@@ -430,6 +455,46 @@ def _derive_id(path: Path, as_id: str | None, *, base: Path | None = None) -> st
             {"path": str(path), "root": str(root), "hint": "pass --as <id>"},
         ) from None
     return validate_id(id_from_path(candidate))
+
+
+def _require_origin_inside(path: Path, root: Path) -> str:
+    """Validate the authoring path before it can be recorded as ``origin``.
+
+    The project root is the directory holding ``.mem.toml``. Resolve symlinks on
+    both sides so an inside-looking path that escapes the tree is caught, reject
+    UNC paths, and compare with the platform's case rules. Returns the resolved
+    path the caller should upload.
+    """
+    detail = {"path": str(path), "root": str(root),
+              "hint": "copy the file under the project root, use `mem pointer add` for a reference, or pass --no-origin --as <id>"}
+    try:
+        candidate = path.resolve(strict=True)
+        base = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise MemError("origin_outside_root", f"cannot resolve {path} inside the project root {root}: {exc}", detail) from exc
+
+    if os.name == "nt":
+        def _unc(value: str) -> bool:
+            lowered = value.lower()
+            if lowered.startswith("\\\\?\\unc\\"):
+                return True
+            return value.startswith("\\\\") and not lowered.startswith("\\\\?\\")
+
+        if _unc(str(candidate)) or _unc(str(base)):
+            raise MemError(
+                "origin_outside_root",
+                f"{path} is a UNC path; project origins must be local paths",
+                detail,
+            )
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise MemError(
+            "origin_outside_root",
+            f"{path} is outside the project root {base}",
+            detail,
+        ) from exc
+    return str(candidate)
 
 
 # --------------------------------------------------------------------------
@@ -695,6 +760,19 @@ def _split_revision(
 def _read_one(args: argparse.Namespace, config: cfg.ClientConfig, client: Client,
               raw_id: str) -> tuple[dict[str, Any], str]:
     note_id, revision, section, span = _split_revision(raw_id, args.revision)
+    link_only = bool(getattr(args, "link_only", False))
+    if link_only and (section is not None or span is not None):
+        raise MemError(
+            "usage_error",
+            "--link-only applies to whole notes; a section or range always inlines",
+            {"id": note_id},
+        )
+    if link_only and args.outline:
+        raise MemError(
+            "usage_error",
+            "--link-only does not apply to --outline; an outline has no body",
+            {"id": note_id},
+        )
     if args.outline and (section is not None or span is not None):
         raise MemError(
             "usage_error",
@@ -723,6 +801,7 @@ def _read_one(args: argparse.Namespace, config: cfg.ClientConfig, client: Client
         section=section,
         span=span,
         max_bytes=config.max_bytes,
+        link_only=link_only,
     )
     if record.get("status") == "pending":
         return record, f"{note_id}: pending as {record['receipt']} (committed: {record.get('committed_revision') or 'none'})"
@@ -767,79 +846,87 @@ def _read_one(args: argparse.Namespace, config: cfg.ClientConfig, client: Client
         record["truncated"] = True
         record["deferred_by_client"] = True
         body = None
-    elif body is None and record.get("truncated") and record.get("bytes", 0) > config.max_bytes:
+    elif (
+        body is None
+        and record.get("truncated")
+        and record.get("bytes", 0) > config.max_bytes
+        and not record.get("link_only")
+    ):
         # The client sends its advisory limit to the server as `max_bytes`, so the
         # SERVER is what withholds the body here -- at this client's request. The
         # decline is still this client's, and without the flag it is invisible:
         # `truncated` is true either way, so a caller cannot tell a handoff it
-        # asked for from one the server's own default imposed.
+        # asked for from one the server's own default imposed. A link-only read is
+        # different: the caller asked for no body, so there is no client decline
+        # to report.
         record["deferred_by_client"] = True
 
     # Which copy is fresh: the committed revision, or this device's working file?
     #
     # Only the client can answer. The server sees the committed bytes and knows
     # the commit time; it cannot stat a file on somebody else's disk. So it hands
-    # over `content_sha256` + `note_updated` alongside the recorded working path,
-    # and the decision is made here, where the file actually is.
+    # over `body_sha256` + `note_updated` alongside the recorded working path,
+    # and the decision is made here, where the file actually is. The whole body
+    # is hashed even for a slice, so a section read can say whether the working
+    # file as a whole still matches the committed revision.
     #
     # The working file is NOT expected to equal the committed revision -- it is
     # the author's copy, and it is legitimately ahead of memory between an edit
     # and the `mem add` that submits it. Divergence is normal; the caller is told
     # which side is newer rather than being handed an unqualified path.
-    if record.get("origin_path") and record.get("content_sha256"):
-        working = resolve_origin(record["origin_path"])
-        if working is None:
-            # Recorded but gone (a temp path since cleaned, or a directory), or
-            # belonging to a path space this platform cannot express. Say so
-            # rather than offering a location that cannot be opened.
-            record.pop("origin_path", None)
-            record["source"] = "none"
-            record["local_file"] = False
-        else:
-            try:
-                raw_bytes = working.read_bytes()
-                digest = hashlib.sha256(raw_bytes).hexdigest()
-                body_digest = hashlib.sha256(
-                    _body_of(raw_bytes.decode("utf-8", "replace")).rstrip("\n").encode("utf-8")
-                ).hexdigest()
-                stat = working.stat()
-            except OSError:
+    if record.get("kind") not in {"file", "dir", "locked"}:
+        if record.get("origin_path"):
+            working = resolve_origin(record["origin_path"])
+            if working is None:
+                # Recorded but gone (a temp path since cleaned, or a directory), or
+                # belonging to a path space this platform cannot express. Say so
+                # rather than offering a location that cannot be opened.
                 record.pop("origin_path", None)
                 record["source"] = "none"
                 record["local_file"] = False
             else:
-                record["origin_path"] = str(working)
-                record["local_file"] = True
-                # Byte hash of the whole file, kept as evidence. It will differ
-                # from `content_sha256` even for an untouched note, because the
-                # server re-serialises frontmatter on upload -- so it is reported,
-                # not used to decide freshness.
-                record["local_sha256"] = digest
-                record["local_body_sha256"] = body_digest
-                record["local_bytes"] = stat.st_size
-                record["local_mtime"] = stat.st_mtime
-                committed_body = record.get("body_sha256")
-                if committed_body and body_digest == committed_body:
-                    record["source"] = "same"
-                    record["body_matches"] = True
+                try:
+                    raw_bytes = working.read_bytes()
+                    body_digest = hashlib.sha256(
+                        _body_of(raw_bytes.decode("utf-8", "replace")).rstrip("\n").encode("utf-8")
+                    ).hexdigest()
+                    stat = working.stat()
+                except OSError:
+                    record.pop("origin_path", None)
+                    record["source"] = "none"
+                    record["local_file"] = False
                 else:
-                    record["body_matches"] = False
-                    newer = _newer_side(record.get("note_updated"), stat.st_mtime)
-                    # Unknown ordering (no commit time, or an unparseable one)
-                    # defaults to the committed revision: it is the one thing the
-                    # caller can always fetch, so it is the safe answer to give
-                    # when freshness cannot be established.
-                    record["source"] = "local" if newer == "local" else "server"
-                    # Only here was a comparison actually performed, so only here
-                    # may the basis be claimed.
-                    record["timestamp_basis"] = "mtime_vs_commit_time"
-    elif record.get("fetch_url"):
-        # No working file was offered at all -- either another device committed
-        # this note, or the recorded origin path was rejected as not a real
-        # location. This is NOT a statement that the committed revision is newer,
-        # which is why it is not `source: "server"`.
-        record["source"] = "none"
-        record["local_file"] = False
+                    record["origin_path"] = str(working)
+                    record["local_file"] = True
+                    record["local_bytes"] = stat.st_size
+                    record["local_mtime"] = stat.st_mtime
+                    committed_body = record.get("body_sha256")
+                    if not committed_body:
+                        # An older server did not identify the body; do not
+                        # invent a comparison that was never performed.
+                        record["source"] = "none"
+                    elif body_digest == committed_body:
+                        record["source"] = "same"
+                        record["body_matches"] = True
+                    else:
+                        record["body_matches"] = False
+                        newer = _newer_side(record.get("note_updated"), stat.st_mtime)
+                        # Unknown ordering (no commit time, or an unparseable one)
+                        # defaults to the committed revision: it is the one thing the
+                        # caller can always fetch, so it is the safe answer to give
+                        # when freshness cannot be established.
+                        record["source"] = "local" if newer == "local" else "server"
+                        # Only here was a comparison actually performed, so only here
+                        # may the basis be claimed.
+                        record["timestamp_basis"] = "mtime_vs_commit_time"
+        else:
+            # No working file was offered at all -- either another device committed
+            # this note, or the recorded origin path was rejected as not a real
+            # location. This is NOT a statement that the committed revision is newer,
+            # which is why it is not `source: "server"`.
+            record["source"] = "none"
+            record["local_file"] = False
+        _strip_freshness_hashes(record)
 
     if record.get("kind") in {"file", "dir", "locked"}:
         state = "resolvable on this device" if record.get("local_resolvable") else f"points at {record.get('points_at', 'another device')}; availability unverified"
@@ -924,9 +1011,13 @@ def _precheck_markdown(content: bytes, label: str) -> None:
 
 def _cmd_add_files(args: argparse.Namespace) -> int:
     config = cfg.load(require_project=True, require_auth=True)
+    no_origin = bool(getattr(args, "no_origin", False))
+    if no_origin and args.pointer:
+        raise MemError("usage_error", "--no-origin applies to content uploads; a pointer never records an origin")
     client = _client(config, args)
     policy = client.policy()
     allowed = set(policy["inline_extensions"])
+    root = config.marker_path.parent if config.marker_path else Path.cwd()
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in args.files:
@@ -935,12 +1026,15 @@ def _cmd_add_files(args: argparse.Namespace) -> int:
             raise MemError("invalid_request", f"not a file: {raw}")
         if path.resolve().is_relative_to((Path.home() / ".device").resolve()):
             raise MemError("invalid_request", "device-home files are private and cannot be added to project memory")
+        extension = path.suffix.lower()
+        inline = not args.pointer and extension in allowed
+        origin_path = None
+        if inline and not no_origin:
+            origin_path = _require_origin_inside(path, root)
         note_id = _derive_id(path, args.as_id, base=config.marker_path.parent if config.marker_path else None)
         if note_id in seen:
             raise MemError("invalid_request", f"duplicate id in batch: {note_id}")
         seen.add(note_id)
-        extension = path.suffix.lower()
-        inline = not args.pointer and extension in allowed
         if inline:
             if path.stat().st_size > policy["max_upload_bytes"]:
                 raise MemError("invalid_request", f"{path} exceeds the inline upload limit; use --pointer")
@@ -950,7 +1044,6 @@ def _cmd_add_files(args: argparse.Namespace) -> int:
             kind = "note" if extension == ".md" else "text"
             if kind == "note":
                 _precheck_markdown(content, str(path))
-            origin_path = str(path.resolve())
         else:
             from .pointers import parse_pointer
             if not config.credentials or not config.credentials.alias:
@@ -997,6 +1090,9 @@ def _cmd_add_files(args: argparse.Namespace) -> int:
 
 def _cmd_add_one(args: argparse.Namespace) -> int:
     config = cfg.load(require_project=True, require_auth=True)
+    no_origin = bool(getattr(args, "no_origin", False))
+    if no_origin and args.pointer:
+        raise MemError("usage_error", "--no-origin applies to content uploads; a pointer never records an origin")
     client = _client(config, args)
 
     from_git = getattr(args, "from_git", None)
@@ -1025,16 +1121,21 @@ def _cmd_add_one(args: argparse.Namespace) -> int:
         policy = client.policy()
         allowed = set(policy["inline_extensions"])
         extension = path.suffix.lower()
+        inline = extension in allowed
+        origin_path = None
+        if inline and not no_origin:
+            origin_path = _require_origin_inside(
+                path, config.marker_path.parent if config.marker_path else Path.cwd()
+            )
         note_id = _derive_id(
             path, args.as_id, base=config.marker_path.parent if config.marker_path else None
         )
-        if extension in allowed:
+        if inline:
             if path.stat().st_size > policy["max_upload_bytes"]:
                 raise MemError("invalid_request", f"{path} exceeds the inline upload limit; use --pointer")
             if extension != ".md" and not note_id.endswith(extension):
                 raise MemError("invalid_request", f"text id must retain the {extension} extension")
             content = path.read_bytes()
-            origin_path = str(path.resolve())
             kind = "note" if extension == ".md" else "text"
         else:
             from .pointers import parse_pointer
@@ -1733,6 +1834,9 @@ def _prepare_capture(repo: Path, rev: str, path: str, config: cfg.ClientConfig,
     origin_path = str(working.resolve())
 
     if extension in allowed:
+        _require_origin_inside(
+            working, config.marker_path.parent if config.marker_path else Path.cwd()
+        )
         content = tracking.committed_bytes(rev, path, repo)
         if len(content) > policy["max_upload_bytes"]:
             raise MemError(

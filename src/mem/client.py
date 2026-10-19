@@ -252,6 +252,7 @@ class Client:
         section: str | None = None,
         span: tuple[int, int] | None = None,
         max_bytes: int | None = None,
+        link_only: bool = False,
     ) -> dict[str, Any]:
         return self._request(
             "GET",
@@ -263,6 +264,7 @@ class Client:
                 "section": section,
                 "range": f"{span[0]}-{span[1]}" if span else None,
                 "max_bytes": max_bytes,
+                "link_only": "true" if link_only else None,
             },
         )
 

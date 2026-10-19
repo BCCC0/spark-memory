@@ -54,7 +54,7 @@ func withSubs(name string, order []string, subs map[string]*commandSpec) *comman
 }
 
 var commandSpecs = func() map[string]*commandSpec {
-	addFlags := map[string]flagKind{"pointer": boolFlag, "as": valueFlag, "expect": valueFlag, "from-git": valueFlag, "message": valueFlag}
+	addFlags := map[string]flagKind{"pointer": boolFlag, "as": valueFlag, "no-origin": boolFlag, "expect": valueFlag, "from-git": valueFlag, "message": valueFlag}
 	add := cmd("add", 1, -1, []string{"files"}, addFlags)
 	add.short = map[byte]string{'m': "message"}
 	rm := cmd("rm", 1, 1, []string{"id"}, map[string]flagKind{"expect": valueFlag, "message": valueFlag})
@@ -78,7 +78,7 @@ var commandSpecs = func() map[string]*commandSpec {
 			"status": valueFlag, "type": valueFlag, "tag": valueFlag, "since": valueFlag,
 			"sort": valueFlag, "limit": valueFlag, "cursor": valueFlag, "full": boolFlag,
 		}),
-		"read": cmd("read", 1, -1, []string{"ids"}, map[string]flagKind{"revision": valueFlag, "outline": boolFlag}),
+		"read": cmd("read", 1, -1, []string{"ids"}, map[string]flagKind{"revision": valueFlag, "outline": boolFlag, "link-only": boolFlag}),
 		"devices": cmd("devices", 0, 0, nil, map[string]flagKind{
 			"retire": valueFlag,
 		}),
