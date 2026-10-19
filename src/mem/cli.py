@@ -332,6 +332,7 @@ def _body_of(text: str) -> str:
     its own, because multi-line YAML values (a Windows `path:`, a summary
     containing `---`) defeat a naive split.
     """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return text
@@ -712,6 +713,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         lock = result.get("lock", {})
         text = [
             f"server   {client.server}",
+            f"commit   {result.get('commit') or 'unknown'}",
             f"project  {result.get('project') or '(none)'}",
             f"head     {result.get('head')}",
             f"message  {result.get('message') or '(none)'}",
@@ -928,7 +930,12 @@ def _read_one(args: argparse.Namespace, config: cfg.ClientConfig, client: Client
     # when the server had already truncated the same note. The two are different
     # facts -- the server's cap and this client's willingness -- and without the
     # flag the second is invisible, since `truncated` is true either way.
-    if body is not None and len(body.encode("utf-8")) > config.max_bytes:
+    if (
+        body is not None
+        and len(body.encode("utf-8")) > config.max_bytes
+        and section is None
+        and span is None
+    ):
         record.pop("body", None)
         record["truncated"] = True
         record["deferred_by_client"] = True
@@ -975,7 +982,11 @@ def _read_one(args: argparse.Namespace, config: cfg.ClientConfig, client: Client
                 try:
                     raw_bytes = working.read_bytes()
                     body_digest = hashlib.sha256(
-                        _body_of(raw_bytes.decode("utf-8", "replace")).rstrip("\n").encode("utf-8")
+                        _body_of(raw_bytes.decode("utf-8", "replace"))
+                        .replace("\r\n", "\n")
+                        .replace("\r", "\n")
+                        .rstrip("\n")
+                        .encode("utf-8")
                     ).hexdigest()
                     stat = working.stat()
                 except OSError:

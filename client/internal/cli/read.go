@@ -58,7 +58,7 @@ func readCommand(o options) (any, string, error) {
 		if r["index_dirty"] == true {
 			tree = "DIRTY -- uncommitted content present"
 		}
-		human := fmt.Sprintf("server   %s\nproject  %s\nhead     %s\nmessage  %s\nlock     %s\ntree     %s\nmax_bytes %s", cl.Base, project, str(r["head"]), message, lockText, tree, str(object(r["read"])["max_bytes"]))
+		human := fmt.Sprintf("server   %s\ncommit   %s\nproject  %s\nhead     %s\nmessage  %s\nlock     %s\ntree     %s\nmax_bytes %s", cl.Base, str(r["commit"]), project, str(r["head"]), message, lockText, tree, str(object(r["read"])["max_bytes"]))
 		if o.has("origins") {
 			origins, auditErr := auditOrigins(c, cl)
 			if auditErr != nil {
@@ -414,7 +414,7 @@ func readOne(o options, c config.Config, cl *transport.Client, raw string) (any,
 		}
 		return result, strings.Join(lines, "\n"), nil
 	}
-	if body, ok := r["body"].(string); ok && len([]byte(body)) > c.MaxBytes {
+	if body, ok := r["body"].(string); ok && len([]byte(body)) > c.MaxBytes && section == "" && span == "" {
 		delete(r, "body")
 		r["truncated"] = true
 		r["deferred_by_client"] = true
@@ -493,7 +493,10 @@ func annotateFreshness(r map[string]any) {
 		r["local_file"] = false
 		return
 	}
-	body := strings.TrimRight(bodyOnly(string(data)), "\n")
+	body := bodyOnly(string(data))
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+	body = strings.TrimRight(body, "\n")
 	bodyHash := sha256.Sum256([]byte(body))
 	r["origin_path"] = working
 	r["local_file"] = true
@@ -531,6 +534,8 @@ func stripFreshnessHashes(r map[string]any) {
 	delete(r, "local_body_sha256")
 }
 func bodyOnly(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 	lines := strings.Split(text, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
 		return text

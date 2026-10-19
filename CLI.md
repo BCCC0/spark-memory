@@ -160,9 +160,13 @@ local files.
 ## Restoring and exporting
 
 `mem pull` restores missing local files in the current project. With no IDs it
-selects every note/text this device owns; with IDs it restores only those.
-Existing files are never overwritten. A missing/unusable origin is reported and
-left alone.
+selects every note this device owns; with IDs it restores only those. Existing
+files are never overwritten. A missing/unusable origin is reported and left
+alone.
+
+Inline text files (`.txt`) store bytes without YAML frontmatter and therefore
+have no `origin`; they are content-only and are reported as `missing_origin` by
+`pull` and `status --origins`. Use a note if local freshness/pull matters.
 
 ```bash
 mem pull
