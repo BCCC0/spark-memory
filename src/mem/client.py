@@ -303,9 +303,10 @@ class Client:
             url += "?" + urllib.parse.urlencode({"rev": revision})
         return url
 
-    def raw(self, project: str, note_id: str, revision: str | None = None) -> str:
-        """Fetch a note body. Used by ``mem read --outline``, which genuinely
-        needs the text; every other verb exchanges coordinates only."""
+    def raw_bytes(
+        self, project: str, note_id: str, revision: str | None = None
+    ) -> bytes:
+        """Fetch the exact committed bytes of a note."""
         url = self.raw_url(project, note_id, revision)
         headers = {"Accept": "text/markdown"}
         if self.token:
@@ -313,13 +314,18 @@ class Client:
         request = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return response.read().decode("utf-8", "replace")
+                return response.read()
         except urllib.error.HTTPError as exc:
             raise self._error_from_http(exc) from exc
         except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as exc:
             raise MemError(
                 "server_unreachable", f"cannot reach {self.server}: {exc}"
             ) from exc
+
+    def raw(self, project: str, note_id: str, revision: str | None = None) -> str:
+        """Fetch a note body. Used by ``mem read --outline``, which genuinely
+        needs the text; every other verb exchanges coordinates only."""
+        return self.raw_bytes(project, note_id, revision).decode("utf-8", "replace")
 
     def add(
         self,
@@ -389,3 +395,30 @@ class Client:
                              json_body={"project": project, "source": source,
                                         "destination": destination, "message": message,
                                         "dry_run": dry_run}, headers=headers)
+
+    def repath(
+        self,
+        project: str,
+        old_path: str,
+        new_path: str,
+        *,
+        idempotency_key: str | None = None,
+        if_match: str | None = None,
+        message: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        if if_match:
+            headers["If-Match"] = if_match
+        return self._request(
+            "POST",
+            "/v1/repath",
+            json_body={
+                "project": project,
+                "old_path": old_path,
+                "new_path": new_path,
+                "message": message,
+                "dry_run": dry_run,
+            },
+            headers=headers,
+        )

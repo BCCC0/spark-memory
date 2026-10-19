@@ -139,8 +139,11 @@ mem add notes/a.md notes/b.md -m "Record related decisions"
 mem add --pointer tools/aria2c.exe tools/helper.exe -m "Catalog local tools"
 mem pointer add '@file(win-workstation:D:\\tools\\aria2c.exe)' tools/aria2c
 mem rm ops/obsolete --expect <sha256>
-mem mv ops/old ops/new --dry-run
-mem mv ops/old ops/new
+mem mv --id ops/old ops/new --dry-run
+mem mv --id ops/old ops/new
+mem mv notes/old.md notes/new.md
+mem pull
+mem export demo --dst D:\backup\demo-notes
 ```
 
 - **Write only durable, reusable knowledge**: a decision and its rationale, a
@@ -164,10 +167,23 @@ mem mv ops/old ops/new
   reapply; do not force it.
 
 If nothing actually changed, the write is a **successful no-op**, not an error.
-For a topic move, end both IDs in `/` (for example `mem mv ops/ archive/ops/`).
-Moves update Markdown note links and structured supersession IDs. They leave
-device-local paths and pointer targets unchanged. A move is one bounded Git
-commit; embeddings catch up in the background and may temporarily report lag.
+
+`mem mv OLD_PATH NEW_PATH` moves a working file and keeps its note ID. Both paths
+must be inside the project root. It updates only `origin`, never the body, and
+blocks until the move commits. A missing old file must be restored first.
+
+`mem mv --id OLD_ID NEW_ID` moves the note ID and references, and leaves local
+files alone. For a topic move, end both IDs in `/` (for example
+`mem mv --id ops/ archive/ops/`). Both forms are blocking queue barriers; unlike
+`add`/`rm`, they do not return a bare `queued` receipt.
+
+`mem status --origins` reports local origins that are missing, outside the
+project root, in another project, ambiguous, or owned by another device.
+
+`mem pull` restores only **missing** files in the current project; it never
+overwrites an existing file. `mem export PROJECT --dst DIR` writes the whole
+project into an empty directory. Export does not need `.mem.toml`, does not read
+origins, and does not register the exported files as authoring copies.
 
 ## What a note looks like
 

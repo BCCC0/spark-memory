@@ -404,6 +404,59 @@ def _looks_like_location(value: str) -> bool:
     return not _OPAQUE_BASENAME_RE.match(stem)
 
 
+def _origin_path_matches(stored: str, requested: str) -> bool:
+    """Compare an origin path with the path a client asked to move.
+
+    The server may run on a different OS from the uploader, so it only applies
+    the normalisation it can prove: exact match, then Windows case and separator
+    folding when both values are absolute Windows paths. WSL/Windows translation
+    is the client's job.
+    """
+    if stored == requested:
+        return True
+    if not (PureWindowsPath(stored).is_absolute() and PureWindowsPath(requested).is_absolute()):
+        return False
+    return str(PureWindowsPath(stored)).replace("\\", "/").lower() == str(
+        PureWindowsPath(requested)
+    ).replace("\\", "/").lower()
+
+
+def _find_origin_note(
+    repo: MemoryRepo, project: str, device_id: str, old_path: str
+) -> tuple[Any, dict[str, Any], bytes]:
+    """Find the one note on *device_id* recorded at *old_path*."""
+    matches: list[tuple[Any, dict[str, Any], bytes]] = []
+    for meta in repo.notes():
+        if meta.project != project or not meta.path.endswith(".md"):
+            continue
+        try:
+            raw = repo.note_bytes(meta.path)
+            text = raw.decode("utf-8", "replace")
+            if pointer_record(text):
+                continue
+            data, _ = fm.parse(text)
+        except Exception:  # noqa: BLE001 - a broken note must not break lookup
+            continue
+        origin = data.get("origin")
+        if not isinstance(origin, dict) or str(origin.get("device") or "") != device_id:
+            continue
+        if _origin_path_matches(str(origin.get("path") or ""), old_path):
+            matches.append((meta, data, raw))
+    if not matches:
+        raise MemError(
+            "origin_not_found",
+            f"no note on this device records the origin {old_path}",
+            {"path": old_path, "hint": "run `mem status --origins` to inspect local origins"},
+        )
+    if len(matches) > 1:
+        raise MemError(
+            "ambiguous_origin",
+            f"{len(matches)} notes record the origin {old_path}",
+            {"path": old_path, "ids": [meta.id for meta, _, _ in matches]},
+        )
+    return matches[0]
+
+
 def _body_only(text: str) -> str:
     """Strip YAML frontmatter so only the note's prose remains.
 
@@ -1505,6 +1558,67 @@ def create_app(settings: Settings) -> Starlette:
                 raise MemError("stale_revision", f"{note_id} has moved since {if_match[:12]}",
                                {"expected": if_match, "actual": actual})
 
+    def _repath_commit(
+        *, device_id: str, project: str, rel: str, note_id: str,
+        old_path: str, new_path: str, message: str, if_match: str | None,
+        work: MemoryRepo,
+    ) -> dict[str, Any]:
+        """Change only a note's origin, in one path-limited commit."""
+        with lock.hold(device_id):
+            target = work.root / rel
+            if not target.is_file():
+                raise MemError(
+                    "origin_not_found",
+                    f"{note_id} no longer exists at {rel}",
+                    {"path": old_path, "id": note_id},
+                )
+            raw = target.read_bytes()
+            data, body = fm.parse(raw.decode("utf-8", "replace"))
+            origin = data.get("origin")
+            if not isinstance(origin, dict) or str(origin.get("device") or "") != device_id:
+                raise MemError(
+                    "origin_not_found",
+                    f"{note_id} is no longer owned by this device",
+                    {"path": old_path, "id": note_id},
+                )
+            if not _origin_path_matches(str(origin.get("path") or ""), old_path):
+                raise MemError(
+                    "origin_not_found",
+                    f"{note_id} no longer records the origin {old_path}",
+                    {"path": old_path, "id": note_id},
+                )
+            current = work.sha256_bytes(raw)
+            if if_match is not None and if_match != current:
+                raise MemError(
+                    "stale_revision",
+                    f"{note_id} has moved since {if_match[:12]}",
+                    {"expected": if_match, "actual": current},
+                )
+            previous = dict(origin)
+            injected = fm.inject(
+                data, body,
+                {"origin": {"device": device_id, "path": new_path}},
+            ).encode("utf-8")
+            try:
+                work.write_note(rel, injected)
+                committed = work.commit_paths(message, [rel], device_id=device_id)
+            except Exception:
+                work.rollback_path(rel, restore=raw)
+                raise
+            return {
+                "id": note_id,
+                "project": project,
+                "path": rel,
+                "previous_origin": previous,
+                "origin": {"device": device_id, "path": new_path},
+                "sha256": work.sha256_bytes(injected),
+                "bytes": len(injected),
+                "head": committed["head"],
+                "message": message if committed["changed"] else None,
+                "changed": committed["changed"],
+                "idempotent_replay": False,
+            }
+
     def _rm_commit(
         *, device_id: str, project: str, rel: str, note_id: str,
         message: str, key: str | None, if_match: str | None,
@@ -1725,6 +1839,67 @@ def create_app(settings: Settings) -> Starlette:
         with tempfile.TemporaryDirectory(prefix="upload-", dir=settings.state_dir) as root:
             return await _add_many_inner(request, Path(root))
 
+    async def repath(request: Request) -> JSONResponse:
+        """Move a working file by updating only its recorded origin."""
+        device = request.state.device
+        payload = await _json_body(request)
+        project = validate_project(str(payload.get("project") or ""))
+        old_path = str(payload.get("old_path") or "").strip()
+        new_path = str(payload.get("new_path") or "").strip()
+        if not old_path or not new_path:
+            raise MemError("invalid_request", "old_path and new_path are required")
+        for label, value in (("old_path", old_path), ("new_path", new_path)):
+            if not (PureWindowsPath(value).is_absolute() or PurePosixPath(value).is_absolute()):
+                raise MemError("invalid_request", f"{label} must be absolute")
+        message = str(payload.get("message") or "").strip()
+        if len(message) > 200:
+            raise MemError("invalid_request", "message is too long (max 200)")
+        dry_run = payload.get("dry_run") is True
+        key = request.headers.get("idempotency-key")
+        if_match = request.headers.get("if-match")
+        prior = await asyncio.to_thread(
+            write_queue.lookup, project, device["device_id"], key
+        )
+        if prior:
+            return JSONResponse(prior, status_code=202)
+        meta, _data, raw = await asyncio.to_thread(
+            _find_origin_note, repo, project, device["device_id"], old_path
+        )
+        current = repo.sha256_bytes(raw)
+        if if_match is not None and if_match != current:
+            raise MemError(
+                "stale_revision",
+                f"{meta.id} has moved since {if_match[:12]}",
+                {"expected": if_match, "actual": current},
+            )
+        if dry_run:
+            return JSONResponse({
+                "id": meta.id,
+                "project": project,
+                "old_path": old_path,
+                "new_path": new_path,
+                "sha256": current,
+                "dry_run": True,
+            })
+        message = message or f"mem: repath {meta.id}"
+        manifest = {
+            "file_count": 0,
+            "device_id": device["device_id"],
+            "project": project,
+            "id": meta.id,
+            "rel": meta.path,
+            "old_path": old_path,
+            "new_path": new_path,
+            "message": message,
+            "if_match": if_match,
+        }
+        result = await asyncio.to_thread(
+            write_queue.submit, project=project, kind="repath", targets=[meta.id],
+            manifest=manifest, files=[], idem=key, require_empty_project=True,
+        )
+        queue_wake.set()
+        return JSONResponse(result, status_code=202)
+
     async def rm(request: Request) -> JSONResponse:
         """Remove **and version** one note, as a single atomic act (S23/S28).
 
@@ -1853,6 +2028,7 @@ def create_app(settings: Settings) -> Starlette:
         Route("/v1/add", add, methods=["POST"]),
         Route("/v1/add-many", add_many, methods=["POST"]),
         Route("/v1/rm", rm, methods=["POST"]),
+        Route("/v1/repath", repath, methods=["POST"]),
         Route("/v1/mv", mv, methods=["POST"]),
     ]
 
@@ -1935,6 +2111,14 @@ def create_app(settings: Settings) -> Starlette:
                 rel=manifest["rel"], note_id=manifest["id"],
                 message=manifest["message"], key=None,
                 if_match=manifest["if_match"],
+                work=work,
+            )
+        if kind == "repath":
+            return _repath_commit(
+                device_id=manifest["device_id"], project=manifest["project"],
+                rel=manifest["rel"], note_id=manifest["id"],
+                old_path=manifest["old_path"], new_path=manifest["new_path"],
+                message=manifest["message"], if_match=manifest["if_match"],
                 work=work,
             )
         if kind == "mv":

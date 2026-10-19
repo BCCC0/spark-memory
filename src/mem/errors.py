@@ -34,6 +34,12 @@ TABLE: dict[str, tuple[int, int]] = {
     # The client refused to record an authoring path outside the project root.
     # Client-side only, like `usage_error`: the server does not know the root.
     "origin_outside_root": (400, 4),
+    # Move/repath failures.
+    "origin_not_found": (404, 9),
+    "ambiguous_origin": (409, 4),
+    "local_file_missing": (400, 4),
+    "local_path_exists": (400, 4),
+    "cross_project_move": (400, 4),
     "internal_error": (500, 1),
     # Client-side only: the CLI could not parse its own arguments. It never
     # reaches the server. It exists so a usage error travels as the one JSON

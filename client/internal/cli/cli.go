@@ -59,7 +59,7 @@ var commandSpecs = func() map[string]*commandSpec {
 	add.short = map[byte]string{'m': "message"}
 	rm := cmd("rm", 1, 1, []string{"id"}, map[string]flagKind{"expect": valueFlag, "message": valueFlag})
 	rm.short = map[byte]string{'m': "message"}
-	mv := cmd("mv", 2, 2, []string{"source", "destination"}, map[string]flagKind{"dry-run": boolFlag, "expect-head": valueFlag, "message": valueFlag})
+	mv := cmd("mv", 2, 2, []string{"source", "destination"}, map[string]flagKind{"id": boolFlag, "dry-run": boolFlag, "expect": valueFlag, "expect-head": valueFlag, "message": valueFlag})
 	mv.short = map[byte]string{'m': "message"}
 	pointerAdd := cmd("add", 2, 2, []string{"expression", "id"}, map[string]flagKind{"message": valueFlag})
 	pointerAdd.short = map[byte]string{'m': "message"}
@@ -69,10 +69,12 @@ var commandSpecs = func() map[string]*commandSpec {
 		"login":    cmd("login", 0, 0, nil, map[string]flagKind{"name": valueFlag, "alias": valueFlag, "secret": valueFlag}),
 		"logout":   cmd("logout", 0, 0, nil, nil),
 		"init":     cmd("init", 0, 1, nil, map[string]flagKind{"summary": valueFlag}),
-		"status":   cmd("status", 0, 0, nil, nil),
+		"status":   cmd("status", 0, 0, nil, map[string]flagKind{"origins": boolFlag}),
 		"flush":    cmd("flush", 0, 0, nil, nil),
 		"projects": cmd("projects", 0, 0, nil, nil),
 		"manifest": cmd("manifest", 0, 1, nil, nil),
+		"pull":     cmd("pull", 0, -1, nil, nil),
+		"export":   cmd("export", 1, 1, []string{"project"}, map[string]flagKind{"dst": valueFlag}),
 		"device":   withSubs("device", []string{"init"}, map[string]*commandSpec{"init": cmd("init", 0, 0, nil, nil)}),
 		"ls": cmd("ls", 0, 1, nil, map[string]flagKind{
 			"status": valueFlag, "type": valueFlag, "tag": valueFlag, "since": valueFlag,
@@ -108,7 +110,7 @@ var commandSpecs = func() map[string]*commandSpec {
 
 func rootChoices() string {
 	// argparse lists commands in declaration order.
-	order := []string{"login", "logout", "init", "status", "flush", "projects", "manifest", "device", "ls", "read", "devices", "add", "pointer", "rm", "mv", "search", "index", "hook"}
+	order := []string{"login", "logout", "init", "status", "flush", "projects", "manifest", "pull", "export", "device", "ls", "read", "devices", "add", "pointer", "rm", "mv", "search", "index", "hook"}
 	out := make([]string, 0, len(order))
 	for _, name := range order {
 		if _, ok := commandSpecs[name]; ok {
@@ -354,7 +356,7 @@ func Run(args []string) int {
 		result, human, err = logout(o)
 	case "init":
 		result, human, err = initProject(o)
-	case "status", "flush", "projects", "manifest", "ls", "read", "search", "index", "devices":
+	case "status", "flush", "projects", "manifest", "pull", "export", "ls", "read", "search", "index", "devices":
 		result, human, err = readCommand(o)
 	case "add", "pointer", "rm", "mv":
 		result, human, err = writeCommand(o)

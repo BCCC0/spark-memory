@@ -1,6 +1,6 @@
 {
   "generator": "tools/gen_client_vectors.py",
-  "source_revision": "sha256:b5ac69dee4521246fcab31bee208525011319b080192812e0aa1c875a5af6ca4",
+  "source_revision": "sha256:0b6e8a6306dcce142ffd305ae2f6d15c0ddc48a551731420f9d46235cddb06bd",
   "error_table": {
     "unauthorized": [
       401,
@@ -63,6 +63,26 @@
       4
     ],
     "origin_outside_root": [
+      400,
+      4
+    ],
+    "origin_not_found": [
+      404,
+      9
+    ],
+    "ambiguous_origin": [
+      409,
+      4
+    ],
+    "local_file_missing": [
+      400,
+      4
+    ],
+    "local_path_exists": [
+      400,
+      4
+    ],
+    "cross_project_move": [
       400,
       4
     ],
@@ -812,6 +832,17 @@
       "expected": "n:dest::e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:mv"
     },
     {
+      "kind": "repath_key",
+      "role": "port-oracle",
+      "input": [
+        "n",
+        "new",
+        "",
+        ""
+      ],
+      "expected": "n:new::e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:repath"
+    },
+    {
       "kind": "add_key",
       "role": "port-oracle",
       "input": [
@@ -843,6 +874,17 @@
         "change"
       ],
       "expected": "n:dest:rev:12ea12eace7d655f471ce55e34f89b1b77a3d9d05a445ca82877dd2235beaa51:mv"
+    },
+    {
+      "kind": "repath_key",
+      "role": "port-oracle",
+      "input": [
+        "n",
+        "new",
+        "rev",
+        "change"
+      ],
+      "expected": "n:new:rev:12ea12eace7d655f471ce55e34f89b1b77a3d9d05a445ca82877dd2235beaa51:repath"
     },
     {
       "kind": "path",

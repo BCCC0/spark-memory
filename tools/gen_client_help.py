@@ -19,7 +19,7 @@ from mem.cli import build_parser  # noqa: E402
 
 commands = [
     (), ("login",), ("logout",), ("init",), ("status",), ("flush",),
-    ("projects",), ("manifest",), ("device",), ("device", "init"),
+    ("projects",), ("manifest",), ("pull",), ("export",), ("device",), ("device", "init"),
     ("ls",), ("read",), ("devices",), ("add",), ("pointer",),
     ("pointer", "add"), ("rm",), ("mv",), ("search",), ("index",),
     ("hook",), ("hook", "add"), ("hook", "rm"),

@@ -89,7 +89,7 @@ func TestPythonContractVectors(t *testing.T) {
 				t.Fatal(err)
 			}
 			got = ids.FromPath(input)
-		case "add_key", "rm_key", "mv_key":
+		case "add_key", "rm_key", "mv_key", "repath_key":
 			var input []string
 			if err := json.Unmarshal(test.Input, &input); err != nil {
 				t.Fatal(err)
@@ -101,6 +101,8 @@ func TestPythonContractVectors(t *testing.T) {
 				got = keys.Remove(input[0], input[1], input[2])
 			case "mv_key":
 				got = keys.Move(input[0], input[1], input[2], input[3])
+			case "repath_key":
+				got = keys.Repath(input[0], input[1], input[2], input[3])
 			}
 		case "path":
 			var input string

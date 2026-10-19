@@ -19,3 +19,7 @@ func Remove(path, expect, message string) string {
 func Move(source, destination, expect, message string) string {
 	return source + ":" + destination + ":" + expect + ":" + hash(message) + ":mv"
 }
+
+func Repath(oldPath, newPath, expect, message string) string {
+	return oldPath + ":" + newPath + ":" + expect + ":" + hash(message) + ":repath"
+}

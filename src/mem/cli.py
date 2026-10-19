@@ -30,6 +30,7 @@ import platform
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ from .client import DEFAULT_TIMEOUT, EMBED_TIMEOUT, Client
 from .errors import MemError
 from .device_home import default_alias, initialize_device_home
 from .ids import RESERVED_PROJECT_NOTE, id_from_path, validate_id, validate_project
-from .keys import add_key, rm_key, mv_key
+from .keys import add_key, rm_key, mv_key, repath_key
 from .paths import resolve_origin
 from . import hooks
 from . import tracking
@@ -111,12 +112,20 @@ def build_parser() -> _Parser:
     init.add_argument("project", nargs="?", help="project name (default: directory name)")
     init.add_argument("--summary", help="one-line project summary")
 
-    sub.add_parser("status", parents=[common], help="server-side status")
+    status = sub.add_parser("status", parents=[common], help="server-side status")
+    status.add_argument("--origins", action="store_true", help="report this device's local origins")
     sub.add_parser("flush", parents=[common], help="wait for accepted writes and text indexing")
     sub.add_parser("projects", parents=[common], help="list projects")
 
     manifest = sub.add_parser("manifest", parents=[common], help="list files under a topic")
     manifest.add_argument("topic", nargs="?", default="")
+
+    pull = sub.add_parser("pull", parents=[common], help="restore missing local files")
+    pull.add_argument("ids", nargs="*", help="specific note ids (default: every missing file this device owns)")
+
+    export = sub.add_parser("export", parents=[common], help="write a project into a clean directory")
+    export.add_argument("project", help="project to export")
+    export.add_argument("--dst", required=True, help="empty or missing destination directory")
 
     device = sub.add_parser("device", parents=[common], help="manage this device's private home")
     device_sub = device.add_subparsers(dest="device_command")
@@ -182,11 +191,13 @@ def build_parser() -> _Parser:
     rm.add_argument("--expect", help="refuse unless the note's sha256 matches")
     rm.add_argument("-m", "--message", help="describe this change (default: derived)")
 
-    mv = sub.add_parser("mv", parents=[common], help="atomically move a record or topic")
-    mv.add_argument("source", help="record ID, or topic ID ending in /")
-    mv.add_argument("destination", help="new ID; end in / for a topic")
+    mv = sub.add_parser("mv", parents=[common], help="move a working file or a record/topic")
+    mv.add_argument("source", help="working file path, or note ID with --id")
+    mv.add_argument("destination", help="new working file path, or new ID with --id")
+    mv.add_argument("--id", action="store_true", help="move note IDs instead of working files")
     mv.add_argument("--dry-run", action="store_true", help="preview affected IDs and references")
-    mv.add_argument("--expect-head", help="refuse unless the repository HEAD matches")
+    mv.add_argument("--expect", help="path mode: refuse unless the note's sha256 matches")
+    mv.add_argument("--expect-head", help="ID mode: refuse unless the repository HEAD matches")
     mv.add_argument("-m", "--message", help="describe this move")
 
     search = sub.add_parser("search", parents=[common], help="server-side text search")
@@ -625,10 +636,77 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _audit_origins(config: cfg.ClientConfig, client: Client) -> dict[str, Any]:
+    from .pointers import parse_pointer
+
+    root = (config.marker_path.parent if config.marker_path else Path.cwd()).resolve()
+    own_device = config.credentials.device_id if config.credentials else ""
+    cursor = ""
+    rows: list[dict[str, Any]] = []
+    while True:
+        page = client.notes(
+            config.project, full="true", limit=500, cursor=cursor or None
+        )
+        rows.extend(page.get("notes") or [])
+        cursor = page.get("next_cursor") or ""
+        if not cursor:
+            break
+
+    entries: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
+    for row in rows:
+        if row.get("kind") in {"topic", "file", "dir", "locked"}:
+            # Topics and pointer records have no note origin. Treating them as
+            # remote origins inflated the audit and produced pathless entries.
+            continue
+        origin = row.get("origin") or {}
+        device = origin.get("device")
+        if device != own_device:
+            entries.append({"id": row["id"], "state": "remote"})
+            continue
+        pointer = origin.get("pointer")
+        if not pointer:
+            entries.append({"id": row["id"], "state": "unresolved"})
+            continue
+        try:
+            path = Path(parse_pointer(pointer).path)
+        except Exception:
+            entries.append({"id": row["id"], "state": "unresolved"})
+            continue
+        key = str(path).lower() if os.name == "nt" else str(path)
+        seen[key] = seen.get(key, 0) + 1
+        if not path.is_file():
+            state = "missing"
+        else:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                state = "outside_root"
+            else:
+                marker = _nearest_project_marker(resolved)
+                current = root / ".mem.toml"
+                state = "cross_project" if marker and marker.resolve() != current.resolve() else "ok"
+        entries.append({"id": row["id"], "path": str(path), "state": state})
+
+    counts = {"ok": 0, "missing": 0, "outside_root": 0, "cross_project": 0,
+              "ambiguous": 0, "remote": 0, "unresolved": 0}
+    for entry in entries:
+        path = entry.get("path")
+        if path:
+            key = str(Path(path)).lower() if os.name == "nt" else str(Path(path))
+            if seen.get(key, 0) > 1:
+                entry["state"] = "ambiguous"
+        counts[entry["state"]] += 1
+
+    return {"counts": counts, "entries": entries}
+
+
 def cmd_status(args: argparse.Namespace) -> int:
-    config = cfg.load(require_project=False, require_auth=True)
+    config = cfg.load(require_project=bool(args.origins), require_auth=True)
     client = _client(config, args)
     result = client.status(config.project or "")
+    origins = _audit_origins(config, client) if args.origins else None
+    if origins is not None:
+        result["origins"] = origins
     if args.human:
         lock = result.get("lock", {})
         text = [
@@ -640,6 +718,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"tree     {'DIRTY -- uncommitted content present' if result.get('index_dirty') else 'clean'}",
             f"max_bytes {result.get('read', {}).get('max_bytes')}",
         ]
+        if origins is not None:
+            text.append(
+                "origins  "
+                + ", ".join(f"{name} {count}" for name, count in origins["counts"].items())
+            )
+            for entry in origins["entries"]:
+                if entry["state"] != "ok":
+                    text.append(f"  {entry['state']:<13} {entry['id']}  {entry.get('path', '')}")
         emit(result, human="\n".join(text), as_human=True)
         return 0
     emit(result)
@@ -1211,24 +1297,413 @@ def cmd_rm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _nearest_project_marker(path: Path) -> Path | None:
+    current = path if path.is_dir() else path.parent
+    for directory in (current, *current.parents):
+        candidate = directory / ".mem.toml"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _require_move_path(
+    path: Path,
+    root: Path,
+    *,
+    must_exist: bool,
+    allow_existing: Path | None = None,
+) -> Path:
+    """Validate one side of an in-project path move."""
+    detail = {"path": str(path), "root": str(root)}
+    if must_exist:
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise MemError("local_file_missing", f"working file is missing: {path}", detail) from exc
+        if not resolved.is_file():
+            raise MemError("local_file_missing", f"not a regular file: {path}", detail)
+    else:
+        try:
+            parent = path.parent.resolve(strict=True)
+        except OSError as exc:
+            raise MemError(
+                "invalid_request", f"destination directory does not exist: {path.parent}", detail
+            ) from exc
+        resolved = parent / path.name
+        if resolved.exists() and (allow_existing is None or resolved != allow_existing):
+            raise MemError("local_path_exists", f"destination already exists: {path}", detail)
+
+    root = root.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise MemError(
+            "origin_outside_root", f"{path} is outside the project root {root}", detail
+        ) from exc
+
+    marker = _nearest_project_marker(resolved)
+    current = root / ".mem.toml"
+    if marker is not None and marker.resolve() != current.resolve():
+        raise MemError(
+            "cross_project_move",
+            f"{path} belongs to another project ({marker.parent})",
+            {**detail, "other_project_root": str(marker.parent)},
+        )
+    return resolved
+
+
+def _wait_for_queue(client: Client) -> dict[str, Any]:
+    """Wait for queued work to drain; abort if any prior job failed."""
+    deadline = time.monotonic() + FLUSH_TIMEOUT
+    progress = client.queue_progress()
+    through = progress["through"]
+    while progress["pending"]:
+        if progress.get("failed"):
+            raise MemError(
+                "queued_write_failed",
+                f"{len(progress['failed'])} queued write(s) failed",
+                {"through": through, "failed": progress["failed"]},
+            )
+        if time.monotonic() >= deadline:
+            raise MemError("lock_timeout", "timed out waiting for queued writes", {"through": through})
+        time.sleep(0.1)
+        progress = client.queue_progress(through)
+    if progress.get("failed"):
+        raise MemError(
+            "queued_write_failed",
+            f"{len(progress['failed'])} queued write(s) failed",
+            {"through": through, "failed": progress["failed"]},
+        )
+    return progress
+
+
+def _wait_for_job(client: Client, receipt: str, seq: int) -> dict[str, Any]:
+    deadline = time.monotonic() + FLUSH_TIMEOUT
+    while True:
+        progress = client.queue_progress(seq)
+        failed = [row for row in progress.get("failed", []) if row.get("receipt") == receipt]
+        if failed:
+            raise MemError(
+                "queued_write_failed",
+                f"move {receipt} failed",
+                {"through": seq, "failed": failed},
+            )
+        if progress["pending"] == 0:
+            return progress
+        if time.monotonic() >= deadline:
+            raise MemError("lock_timeout", "timed out waiting for the move to commit", {"through": seq})
+        time.sleep(0.1)
+
+
+def _move_head(client: Client, project: str) -> str | None:
+    """Best-effort final head; the move has already committed."""
+    try:
+        return client.status(project).get("head")
+    except Exception:
+        return None
+
+
+def _rename_local(source: Path, destination: Path) -> None:
+    if str(source) == str(destination):
+        return
+    if os.name == "nt" and str(source).lower() == str(destination).lower():
+        temporary = source.with_name(source.name + ".mem-mv-tmp")
+        os.rename(source, temporary)
+        os.rename(temporary, destination)
+        return
+    os.rename(source, destination)
+
+
+def _note_rows(client: Client, project: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    cursor = ""
+    while True:
+        page = client.notes(
+            project, full="true", limit=500, cursor=cursor or None
+        )
+        rows.extend(page.get("notes") or [])
+        cursor = page.get("next_cursor") or ""
+        if not cursor:
+            return rows
+
+
+def _atomic_write(path: Path, data: bytes, *, create_parents: bool) -> None:
+    if create_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    elif not path.parent.is_dir():
+        raise MemError(
+            "invalid_request",
+            f"parent directory does not exist: {path.parent}",
+            {"path": str(path)},
+        )
+    fd, temporary = tempfile.mkstemp(prefix=".mem-pull-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o644)
+        try:
+            # A hard link is atomic and fails if the target already exists, so a
+            # racing writer can never be overwritten by os.replace().
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise MemError(
+                "local_path_exists", f"destination already exists: {path}", {"path": str(path)}
+            ) from exc
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
+def _clean_export_destination(value: str) -> Path:
+    destination = Path(value).expanduser()
+    if not destination.is_absolute():
+        destination = Path.cwd() / destination
+    # Resolve existing symlinks and normalise `..`; strict=False also handles a
+    # destination that does not exist yet.
+    try:
+        destination = destination.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise MemError("invalid_request", f"cannot resolve export destination: {exc}", {"destination": str(destination)}) from exc
+
+    if any((directory / ".mem.toml").is_file() for directory in (destination, *destination.parents)):
+        raise MemError(
+            "invalid_request",
+            f"export destination is inside a memory project: {destination}",
+            {"destination": str(destination)},
+        )
+    if destination.exists():
+        if not destination.is_dir():
+            raise MemError("invalid_request", f"export destination is not a directory: {destination}", {"destination": str(destination)})
+        try:
+            non_empty = any(destination.iterdir())
+        except OSError as exc:
+            raise MemError("internal_error", f"cannot inspect export destination: {exc}", {"destination": str(destination)}) from exc
+        if non_empty:
+            raise MemError("invalid_request", f"export destination is not empty: {destination}", {"destination": str(destination)})
+    return destination
+
+
+def _export_target(destination: Path, row: dict[str, Any]) -> Path:
+    note_id = validate_id(str(row["id"]))
+    if str(row.get("kind")) == "note":
+        return destination / f"{note_id}.md"
+    if str(row.get("kind")) == "text":
+        return destination / note_id
+    raise MemError("invalid_request", f"cannot export a {row.get('kind')!r} record", {"id": note_id})
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    config = cfg.load(require_project=True, require_auth=True)
+    client = _client(config, args)
+    from .pointers import parse_pointer
+
+    root = (config.marker_path.parent if config.marker_path else Path.cwd()).resolve()
+    current_marker = (root / ".mem.toml").resolve()
+    own_device = config.credentials.device_id if config.credentials else ""
+    rows = _note_rows(client, config.project)
+    requested = set(args.ids)
+    seen: set[str] = set()
+    written: list[str] = []
+    skipped: list[str] = []
+    damaged: list[dict[str, Any]] = []
+
+    for row in rows:
+        note_id = str(row.get("id") or "")
+        if requested and note_id not in requested:
+            continue
+        if row.get("kind") not in {"note", "text"}:
+            continue
+        seen.add(note_id)
+        origin = row.get("origin") or {}
+        if not requested and origin.get("device") != own_device:
+            continue
+        if origin.get("device") != own_device or not origin.get("pointer"):
+            damaged.append({"id": note_id, "reason": "missing_origin"})
+            continue
+        try:
+            target = Path(parse_pointer(str(origin["pointer"])).path).expanduser()
+            resolved = target.resolve(strict=False)
+        except Exception:
+            damaged.append({"id": note_id, "reason": "missing_origin"})
+            continue
+        if not resolved.is_relative_to(root):
+            damaged.append({"id": note_id, "path": str(target), "reason": "outside_root"})
+            continue
+        marker = _nearest_project_marker(resolved)
+        if marker is not None and marker.resolve() != current_marker:
+            damaged.append({"id": note_id, "path": str(target), "reason": "nested_project"})
+            continue
+        if target.exists():
+            if target.is_file():
+                skipped.append(str(target))
+            else:
+                damaged.append({"id": note_id, "path": str(target), "reason": "not_a_file"})
+            continue
+        if not target.parent.is_dir():
+            damaged.append({"id": note_id, "path": str(target), "reason": "missing_parent"})
+            continue
+        try:
+            _atomic_write(target, client.raw_bytes(config.project, note_id), create_parents=False)
+        except MemError:
+            raise
+        except OSError as exc:
+            damaged.append({"id": note_id, "path": str(target), "reason": f"write_failed: {exc}"})
+            continue
+        written.append(str(target))
+
+    for note_id in requested - seen:
+        damaged.append({"id": note_id, "reason": "not_found"})
+
+    result = {"written": written, "skipped": skipped, "damaged": damaged}
+    human = f"pulled {len(written)} file(s); skipped {len(skipped)}"
+    if damaged:
+        human += f"; damaged {len(damaged)}"
+    emit(result, human=human, as_human=args.human)
+    if damaged:
+        raise MemError("invalid_request", "pull completed with damaged files", {"damaged": damaged})
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    config = cfg.load(require_project=False, require_auth=True)
+    project = validate_project(args.project)
+    destination = _clean_export_destination(args.dst)
+    client = _client(config, args)
+
+    rows = _note_rows(client, project)
+    written: list[str] = []
+    for row in rows:
+        if row.get("kind") not in {"note", "text"}:
+            continue
+        target = _export_target(destination, row)
+        if target.exists():
+            raise MemError("local_path_exists", f"export target already exists: {target}", {"path": str(target)})
+        try:
+            _atomic_write(target, client.raw_bytes(project, str(row["id"])), create_parents=True)
+        except MemError:
+            raise
+        except OSError as exc:
+            raise MemError(
+                "internal_error", f"cannot write {target}: {exc}", {"path": str(target)}
+            ) from exc
+        written.append(str(target))
+
+    result = {"project": project, "destination": str(destination), "count": len(written), "written": written}
+    emit(result, human=f"exported {len(written)} file(s) to {destination}", as_human=args.human)
+    return 0
+
+
 def cmd_mv(args: argparse.Namespace) -> int:
     config = cfg.load(require_project=True, require_auth=True)
-    folder = args.source.endswith("/")
-    if folder != args.destination.endswith("/"):
-        raise MemError("invalid_request", "folder moves require trailing '/' on both IDs")
-    source = validate_id(args.source.rstrip("/"))
-    destination = validate_id(args.destination.rstrip("/"))
-    source_arg = source + ("/" if folder else "")
-    destination_arg = destination + ("/" if folder else "")
-    result = _client(config, args).mv(
-        config.project, source_arg, destination_arg,
-        idempotency_key=None if args.dry_run else mv_key(source_arg, destination_arg,
-                                                          args.expect_head, message=args.message),
-        if_match=args.expect_head, message=args.message, dry_run=args.dry_run,
+    client = _client(config, args)
+
+    if args.id:
+        if args.expect:
+            raise MemError("usage_error", "--expect is only valid for path moves")
+        folder = args.source.endswith("/")
+        if folder != args.destination.endswith("/"):
+            raise MemError("invalid_request", "folder moves require trailing '/' on both IDs")
+        source = validate_id(args.source.rstrip("/"))
+        destination = validate_id(args.destination.rstrip("/"))
+        source_arg = source + ("/" if folder else "")
+        destination_arg = destination + ("/" if folder else "")
+        if args.dry_run:
+            result = client.mv(
+                config.project, source_arg, destination_arg,
+                idempotency_key=None, if_match=args.expect_head,
+                message=args.message, dry_run=True,
+            )
+            emit(result, human=f"would move {source_arg} to {destination_arg}", as_human=args.human)
+            return 0
+        _wait_for_queue(client)
+        result = client.mv(
+            config.project, source_arg, destination_arg,
+            idempotency_key=mv_key(source_arg, destination_arg, args.expect_head,
+                                   message=args.message),
+            if_match=args.expect_head, message=args.message, dry_run=False,
+        )
+        _wait_for_job(client, result["receipt"], result["seq"])
+        final = {**result, "status": "committed", "head": _move_head(client, config.project)}
+        emit(final, human=f"moved {source_arg} to {destination_arg}", as_human=args.human)
+        return 0
+
+    if args.expect_head:
+        raise MemError("usage_error", "--expect-head is only valid with --id")
+    if args.source.endswith("/") or args.destination.endswith("/"):
+        raise MemError("invalid_request", "path moves take files, not topic IDs")
+    if not Path(args.source).expanduser().exists():
+        try:
+            validate_id(args.source)
+            validate_id(args.destination)
+        except MemError:
+            pass
+        else:
+            if not Path(args.source).suffix and not Path(args.destination).suffix:
+                raise MemError(
+                    "usage_error",
+                    "mem mv now moves working files; use `mem mv --id` to move note IDs",
+                    {"source": args.source, "destination": args.destination},
+                )
+    root = config.marker_path.parent if config.marker_path else Path.cwd()
+    source = _require_move_path(Path(args.source).expanduser(), root, must_exist=True)
+    destination = _require_move_path(
+        Path(args.destination).expanduser(), root, must_exist=False, allow_existing=source
     )
-    emit(result, human=(f"would move {source_arg} to {destination_arg}" if args.dry_run
-                        else f"queued mv {source_arg} to {destination_arg} as {result['receipt']}"),
-         as_human=args.human)
+    old_path, new_path = str(source), str(destination)
+
+    if args.dry_run:
+        result = client.repath(
+            config.project, old_path, new_path,
+            if_match=args.expect, message=args.message, dry_run=True,
+        )
+        emit(result, human=f"would move {old_path} to {new_path}", as_human=args.human)
+        return 0
+
+    _wait_for_queue(client)
+    # Resolve before touching the filesystem, so a typo cannot move a file that
+    # no note owns.
+    lookup = client.repath(
+        config.project, old_path, new_path,
+        if_match=args.expect, message=args.message, dry_run=True,
+    )
+    try:
+        _rename_local(source, destination)
+    except OSError as exc:
+        raise MemError(
+            "internal_error",
+            "cannot move local file: " + str(exc),
+            {"source": str(source), "destination": str(destination)},
+        ) from exc
+    try:
+        result = client.repath(
+            config.project, old_path, new_path,
+            idempotency_key=repath_key(old_path, new_path, args.expect, message=args.message),
+            if_match=args.expect, message=args.message, dry_run=False,
+        )
+        _wait_for_job(client, result["receipt"], result["seq"])
+    except Exception:
+        try:
+            _rename_local(destination, source)
+        except OSError as rollback:
+            raise MemError(
+                "internal_error",
+                "move failed and the local rename could not be rolled back",
+                {"move_error": "see previous error", "rollback_error": str(rollback)},
+            ) from rollback
+        raise
+
+    final = {
+        "status": "committed",
+        "id": lookup["id"],
+        "old_path": old_path,
+        "new_path": new_path,
+        "head": _move_head(client, config.project),
+    }
+    emit(final, human=f"moved {old_path} to {new_path}", as_human=args.human)
     return 0
 
 
@@ -1920,6 +2395,8 @@ DISPATCH = {
     "flush": cmd_flush,
     "projects": cmd_projects,
     "manifest": cmd_manifest,
+    "pull": cmd_pull,
+    "export": cmd_export,
     "device": cmd_device,
     "ls": cmd_ls,
     "read": cmd_read,
