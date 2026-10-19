@@ -12,8 +12,12 @@ var Table = map[string]Definition{
 	"schema_invalid": {422, 4}, "staging_diverged": {409, 5},
 	"no_project": {404, 6}, "stale_revision": {412, 7},
 	"target_moved": {410, 9}, "not_found": {404, 9},
-	"invalid_request": {400, 4}, "origin_outside_root": {400, 4}, "internal_error": {500, 1},
-	"usage_error": {400, 64},
+	"invalid_request": {400, 4}, "origin_outside_root": {400, 4},
+	"origin_not_found": {404, 9}, "ambiguous_origin": {409, 4},
+	"local_file_missing": {400, 4}, "local_path_exists": {400, 4},
+	"cross_project_move": {400, 4},
+	"internal_error":     {500, 1},
+	"usage_error":        {400, 64},
 }
 
 type Error struct {

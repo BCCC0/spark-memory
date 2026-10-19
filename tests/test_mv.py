@@ -18,12 +18,12 @@ def test_file_move_updates_links_and_frontmatter(ready):
     ready.cli_json("add", "backlink.md", "--as", "ops/backlink")
     before = ready.cli_json("status")["head"]
 
-    preview = ready.cli_json("mv", "ops/source", "ops/renamed", "--dry-run")
+    preview = ready.cli_json("mv", "--id", "ops/source", "ops/renamed", "--dry-run")
     assert preview["moved"] == {"ops/source": "ops/renamed"}
     assert preview["references_updated"] == ["ops/backlink"]
     assert ready.cli_json("status")["head"] == before
 
-    result = ready.cli_json("mv", "ops/source", "ops/renamed", "--expect-head", before)
+    result = ready.cli_json("mv", "--id", "ops/source", "ops/renamed", "--expect-head", before)
     assert result["changed"] is True
     assert result["head"] != before
     assert ready.cli("read", "ops/source").returncode == 9
@@ -42,7 +42,7 @@ def test_topic_move_preserves_text_and_pointer_targets(ready):
     binary.write_bytes(bytes([0, 1, 2]))
     ready.cli_json("add", str(binary), "--as", "tools/setup/tool.bin")
     target = ready.cli_json("read", "tools/setup/tool.bin")["local_path"]
-    result = ready.cli_json("mv", "tools/", "archive/tools/")
+    result = ready.cli_json("mv", "--id", "tools/", "archive/tools/")
     assert result["moved"] == {
         "tools/setup/guide.txt": "archive/tools/setup/guide.txt",
         "tools/setup/tool.bin": "archive/tools/setup/tool.bin",
@@ -59,9 +59,9 @@ def test_move_rejects_collisions_wildcards_and_stale_head(ready):
     ready.write("second.md", note_text())
     ready.cli_json("add", "second.md", "--as", "second")
     head = ready.cli_json("status")["head"]
-    assert ready.cli("mv", "first", "second").returncode == 4
-    assert ready.cli("mv", "first*", "other").returncode == 4
-    assert ready.cli("mv", "first", "other", "--expect-head", "0" * 40).returncode == 7
+    assert ready.cli("mv", "--id", "first", "second").returncode == 4
+    assert ready.cli("mv", "--id", "first*", "other").returncode == 4
+    assert ready.cli("mv", "--id", "first", "other", "--expect-head", "0" * 40).returncode == 7
     assert ready.cli_json("status")["head"] == head
     assert ready.cli_json("read", "first")["id"] == "first"
 
@@ -69,7 +69,7 @@ def test_move_rejects_collisions_wildcards_and_stale_head(ready):
 def test_folder_cannot_move_into_itself(ready):
     ready.write("a.md", note_text())
     ready.cli_json("add", "a.md", "--as", "tools/a")
-    assert ready.cli("mv", "tools/", "tools/nested/").returncode == 4
+    assert ready.cli("mv", "--id", "tools/", "tools/nested/").returncode == 4
 
 
 def test_move_replay_and_size_limit(ready, monkeypatch):
@@ -81,11 +81,11 @@ def test_move_replay_and_size_limit(ready, monkeypatch):
     ready.cli_json("add", "b.md", "--as", "b")
     head = ready.cli_json("status")["head"]
     monkeypatch.setattr(moves, "MAX_MOVE_RECORDS", 1)
-    assert ready.cli("mv", "a", "c").returncode == 4
+    assert ready.cli("mv", "--id", "a", "c").returncode == 4
     assert ready.cli_json("status")["head"] == head
     monkeypatch.setattr(moves, "MAX_MOVE_RECORDS", 100)
-    first = ready.cli_json("mv", "a", "c")
-    replay = ready.cli_json("mv", "a", "c")
+    first = ready.cli_json("mv", "--id", "a", "c")
+    replay = ready.cli_json("mv", "--id", "a", "c")
     assert replay["idempotent_replay"] is True
     assert replay["head"] == first["head"]
 
@@ -106,11 +106,9 @@ def test_failed_move_rolls_back_all_paths(ready, monkeypatch):
         return previous(self, message, relpaths, device_id=device_id)
 
     monkeypatch.setattr(MemoryRepo, "commit_paths", fail_move)
-    accepted = ready.cli("mv", "a", "c")
-    assert accepted.returncode == 0
-    failed = ready.cli("flush")
-    assert failed.returncode == 1
-    assert "queued_write_failed" in failed.stderr
+    accepted = ready.cli("mv", "--id", "a", "c")
+    assert accepted.returncode == 1
+    assert "queued_write_failed" in accepted.stderr
     assert ready.cli_json("status")["head"] == head
     assert (ready.repo / "projects/demo/a.md").read_bytes() == original
     assert not (ready.repo / "projects/demo/c.md").exists()
@@ -145,7 +143,7 @@ def test_move_reindexes_text_and_embeddings(ready):
     ready.write("a.md", note_text(body="A unique migration lantern for search."))
     ready.cli_json("add", "a.md", "--as", "old/a")
     ready.wait_for_vectors()
-    ready.cli_json("mv", "old/", "new/")
+    ready.cli_json("mv", "--id", "old/", "new/")
     text_hits = ready.cli_json("search", "migration lantern")["hits"]
     assert "new/a" in [hit["id"] for hit in text_hits]
     assert "old/a" not in [hit["id"] for hit in text_hits]
@@ -197,7 +195,7 @@ def test_recover_committed_move_records_replay(ready):
     ready.write("a.md", note_text())
     ready.cli_json("add", "a.md", "--as", "a")
     old_head = ready.cli_json("status")["head"]
-    result = ready.cli_json("mv", "a", "b")
+    result = ready.cli_json("mv", "--id", "a", "b")
     destination = ready.repo / "projects/demo/b.md"
     body = destination.read_bytes()
     destination.unlink()

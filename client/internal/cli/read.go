@@ -22,7 +22,10 @@ import (
 )
 
 func readCommand(o options) (any, string, error) {
-	requireProject := map[string]bool{"manifest": true, "ls": true, "read": true}
+	requireProject := map[string]bool{"manifest": true, "ls": true, "read": true, "pull": true}
+	if o.command == "status" && o.has("origins") {
+		requireProject["status"] = true
+	}
 	if o.command == "search" && o.flag("project") == "" {
 		requireProject["search"] = true
 	}
@@ -56,9 +59,21 @@ func readCommand(o options) (any, string, error) {
 			tree = "DIRTY -- uncommitted content present"
 		}
 		human := fmt.Sprintf("server   %s\nproject  %s\nhead     %s\nmessage  %s\nlock     %s\ntree     %s\nmax_bytes %s", cl.Base, project, str(r["head"]), message, lockText, tree, str(object(r["read"])["max_bytes"]))
+		if o.has("origins") {
+			origins, auditErr := auditOrigins(c, cl)
+			if auditErr != nil {
+				return nil, "", auditErr
+			}
+			r["origins"] = origins
+			human += "\norigins  " + originsHuman(origins)
+		}
 		return result, human, err
 	case "flush":
 		return flush(cl)
+	case "pull":
+		return pullCommand(o, c, cl)
+	case "export":
+		return exportCommand(o, c, cl)
 	case "projects":
 		result, err := req(cl, "GET", "/v1/projects", nil, nil, nil)
 		var lines []string

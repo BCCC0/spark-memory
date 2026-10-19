@@ -128,6 +128,8 @@ def main() -> None:
             keys.rm_key(path, expect, message=message), "port-oracle")
         add("mv_key", [path, "dest", expect, message],
             keys.mv_key(path, "dest", expect, message=message), "port-oracle")
+        add("repath_key", [path, "new", expect, message],
+            keys.repath_key(path, "new", expect, message=message), "port-oracle")
 
     for value in ["/mnt/d/src/x.md", "/mnt/c", "/mnt/e/", "D:\\src\\x.md",
                   "C:/Work/a.md", "relative/x", "/home/x", "d:",

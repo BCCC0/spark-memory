@@ -339,7 +339,9 @@ mem ls
 mem manifest ops
 mem read ops/decisions --outline
 mem read ops/decisions@<revision>
-mem mv ops/old ops/new
+mem mv --id ops/old ops/new
+mem pull
+mem export demo --dst <clean-directory>
 mem rm ops/obsolete --expect <sha256>
 mem devices
 ```

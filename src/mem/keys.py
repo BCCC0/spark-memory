@@ -44,5 +44,15 @@ def rm_key(path: str, if_match: str | None, *, message: str | None = None) -> st
     return f"{path}:{if_match or ''}:{_metadata_hash(message)}:rm"
 
 
+def repath_key(
+    old_path: str,
+    new_path: str,
+    if_match: str | None,
+    *,
+    message: str | None = None,
+) -> str:
+    return f"{old_path}:{new_path}:{if_match or ''}:{_metadata_hash(message)}:repath"
+
+
 def mv_key(source: str, destination: str, if_match: str | None, *, message: str | None = None) -> str:
     return f"{source}:{destination}:{if_match or ''}:{_metadata_hash(message)}:mv"

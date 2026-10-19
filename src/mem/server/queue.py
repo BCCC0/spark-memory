@@ -198,7 +198,7 @@ class WriteQueue:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 if idem:
-                    prior = db.execute("SELECT id, status FROM jobs WHERE idem=?", (idem,)).fetchone()
+                    prior = db.execute("SELECT id, status, seq FROM jobs WHERE idem=?", (idem,)).fetchone()
                     if prior:
                         if prior["status"] == "failed":
                             db.execute("UPDATE jobs SET idem=NULL WHERE id=?", (prior["id"],))
@@ -206,6 +206,7 @@ class WriteQueue:
                             original_targets = [r[0] for r in db.execute(
                                 "SELECT id FROM job_targets WHERE job_id=? ORDER BY id", (prior["id"],))]
                             return {"status": prior["status"], "receipt": prior["id"],
+                                    "seq": prior["seq"],
                                     "affected_ids": original_targets, "idempotent_replay": True}
                 count, used = db.execute(
                     "SELECT COUNT(*), COALESCE(SUM(bytes),0) FROM jobs WHERE status IN ('queued','running')"
@@ -245,10 +246,11 @@ class WriteQueue:
                     if os.name != "nt":
                         _sync_dir(temp)
                     _durable_replace(temp, final)
-                    db.execute(
+                    cursor = db.execute(
                         "INSERT INTO jobs(id,project,kind,status,bytes,idem,created) VALUES(?,?,?,'queued',?,?,?)",
                         (receipt, project, kind, size, idem, time.time()),
                     )
+                    seq = int(cursor.lastrowid)
                     db.executemany("INSERT INTO targets(project,id,job_id) VALUES(?,?,?)",
                                    [(project, target, receipt) for target in targets])
                     db.executemany("INSERT INTO job_targets(project,id,job_id) VALUES(?,?,?)",
@@ -260,6 +262,7 @@ class WriteQueue:
                     shutil.rmtree(final, ignore_errors=True)
                     raise
                 return {"status": "queued", "receipt": receipt,
+                        "seq": seq,
                         "affected_ids": targets, "idempotent_replay": False}
 
     def next_job(self) -> dict[str, Any] | None:
@@ -276,12 +279,12 @@ class WriteQueue:
             return None
         idem = _scoped_key(project, device_id, idem)
         with self._guard, self._connect() as db:
-            row = db.execute("SELECT id, status FROM jobs WHERE idem=?", (idem,)).fetchone()
+            row = db.execute("SELECT id, status, seq FROM jobs WHERE idem=?", (idem,)).fetchone()
             if row is None or row["status"] == "failed":
                 return None
             original_targets = [r[0] for r in db.execute(
                 "SELECT id FROM job_targets WHERE job_id=? ORDER BY id", (row["id"],))]
-            return {"status": row["status"], "receipt": row["id"],
+            return {"status": row["status"], "receipt": row["id"], "seq": row["seq"],
                     "affected_ids": original_targets, "idempotent_replay": True}
 
     def payload(self, receipt: str) -> tuple[dict[str, Any], list[bytes]]:

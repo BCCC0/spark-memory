@@ -109,6 +109,32 @@ func (c *Client) JSON(method, path string, query url.Values, payload any, header
 	}
 	return c.Request(method, path, query, body, contentType, headers, true)
 }
+
+// Raw fetches bytes from a non-JSON endpoint such as /raw/{project}/{id}.
+func (c *Client) Raw(path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(context.Background(), "GET", c.Base+path, nil)
+	if err != nil {
+		return nil, memerr.New("invalid_request", err.Error(), nil)
+	}
+	req.Header.Set("Accept", "text/markdown")
+	req.Header.Set("User-Agent", "mem/0.1")
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, memerr.New("server_unreachable", "cannot reach "+c.Base+": "+err.Error(), map[string]any{"server": c.Base})
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, memerr.New("internal_error", err.Error(), nil)
+	}
+	if res.StatusCode >= 400 {
+		return nil, responseError(res.StatusCode, data)
+	}
+	return data, nil
+}
 func (c *Client) Multipart(path string, fields map[string]string, filename string, data []byte, headers http.Header) (any, error) {
 	var buffer bytes.Buffer
 	w := multipart.NewWriter(&buffer)

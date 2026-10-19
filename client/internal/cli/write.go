@@ -64,35 +64,7 @@ func writeCommand(o options) (any, string, error) {
 		result, err := req(cl, "POST", "/v1/rm", nil, map[string]any{"project": c.Project, "id": id, "message": emptyToNil(o.flag("message"))}, headers(keys.Remove(id, o.flag("expect"), o.flag("message")), o.flag("expect")))
 		return result, fmt.Sprintf("queued rm %s as %s", id, stringField(result, "receipt")), err
 	case "mv":
-		if err := o.count(2, 2); err != nil {
-			return nil, "", err
-		}
-		folder := strings.HasSuffix(o.positional[0], "/")
-		if folder != strings.HasSuffix(o.positional[1], "/") {
-			return nil, "", memerr.New("invalid_request", "folder moves require trailing '/' on both IDs", nil)
-		}
-		src, err := ids.Validate(strings.TrimSuffix(o.positional[0], "/"))
-		if err != nil {
-			return nil, "", err
-		}
-		dst, err := ids.Validate(strings.TrimSuffix(o.positional[1], "/"))
-		if err != nil {
-			return nil, "", err
-		}
-		if folder {
-			src += "/"
-			dst += "/"
-		}
-		key := ""
-		if !o.has("dry-run") {
-			key = keys.Move(src, dst, o.flag("expect-head"), o.flag("message"))
-		}
-		result, err := req(cl, "POST", "/v1/mv", nil, map[string]any{"project": c.Project, "source": src, "destination": dst, "message": emptyToNil(o.flag("message")), "dry_run": o.has("dry-run")}, headers(key, o.flag("expect-head")))
-		human := fmt.Sprintf("queued mv %s to %s as %s", src, dst, stringField(result, "receipt"))
-		if o.has("dry-run") {
-			human = fmt.Sprintf("would move %s to %s", src, dst)
-		}
-		return result, human, err
+		return moveCommand(o, c, cl)
 	case "pointer":
 		if o.sub != "add" || len(o.positional) != 2 {
 			return nil, "", memerr.New("usage_error", "use: mem pointer add EXPRESSION ID", nil)

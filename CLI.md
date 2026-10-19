@@ -26,7 +26,8 @@ normally invoked with `uv run mem`.
 | Command or path | Before returning | Blocks the operation? | Visible result |
 | --- | --- | --- | --- |
 | `mem add` | Check every local Markdown summary, upload bytes, and receive durable server acceptance | **Yes** for invalid format, rejected upload, full queue, or an ID already in an unfinished job | `queued` receipt on acceptance; never claims a Git commit already happened |
-| `mem rm`, `mem mv` | Validate the request and receive durable server acceptance | **Yes** for an invalid request or busy affected ID; a move also requires the project's queue to be empty | `queued` receipt; `mem mv --dry-run` remains an immediate preview |
+| `mem rm` | Validate the request and receive durable server acceptance | **Yes** for an invalid request or busy affected ID | `queued` receipt |
+| `mem mv` | Wait for the write queue, perform the move, and wait for it to commit | **Yes**; both path and `--id` forms are blocking | Final move result, not a bare queued receipt |
 | Git pre-commit hook | Check selected staged Markdown locally | **Yes** when selected Markdown has an invalid summary | Format error identifying the staged file |
 | Git post-commit / post-merge hook | Upload selected committed state and receive durable server acceptance | **No**: a sync failure is logged and does not undo the source Git operation | Accepted receipt or logged warning; a busy file requires a later manual `mem hook update` |
 | `mem read ID` | Check the committed Git snapshot and unfinished/failed writes affecting the ID | **No** waiting for the queue | Committed record, `pending` hint, or failed-write error with the last committed revision |
@@ -114,6 +115,80 @@ are not printed by the CLI.
 A slice's `body_matches` compares the whole local file's prose with the whole
 committed body, not with the returned fragment. This is deliberate: a partial
 view must not hide whether the authoring copy is current.
+
+## Moving files and note IDs
+
+There are two distinct moves:
+
+```text
+mem mv OLD_PATH NEW_PATH        # working file; note ID unchanged
+mem mv --id OLD_ID NEW_ID       # note ID/topic; local file unchanged
+```
+
+Path mode is strictly in-project:
+
+- both paths must resolve inside the directory containing `.mem.toml`;
+- a nested `.mem.toml` in either path is another project and is refused;
+- the old file must exist; a missing file is `local_file_missing`;
+- the destination must not exist, except for a case-only rename;
+- the destination parent must already exist;
+- only `origin.path` changes; the body and note ID do not.
+
+ID mode keeps the existing topic/reference semantics and never touches local
+files. Use `--expect` for path mode and `--expect-head` for ID mode.
+
+Both forms are blocking:
+
+1. wait for the write queue to drain;
+2. submit an exclusive move;
+3. wait for its job to commit;
+4. report the final result.
+
+`mem flush` therefore waits for a running `mem mv`. A path move renames the local
+file first and renames it back if the server job fails. There is still no
+cross-system transaction: a crash between the local rename and the commit can
+leave them inconsistent. `mem status --origins` reports that state.
+
+Hooks do not auto-detect `git mv`; a `git mv` captured by `mem hook` appears as a
+new path plus an orphaned old path, not as a move.
+
+`mem status --origins` is the read-only audit: it reports this device's origins
+as `ok`, `missing`, `outside_root`, `cross_project`, `ambiguous`, `remote`, or
+`unresolved`. It exits 0 and is opt-in because it scans the project's notes and
+local files.
+
+## Restoring and exporting
+
+`mem pull` restores missing local files in the current project. With no IDs it
+selects every note/text this device owns; with IDs it restores only those.
+Existing files are never overwritten. A missing/unusable origin is reported and
+left alone.
+
+```bash
+mem pull
+mem pull ops/backlog
+```
+
+`mem export PROJECT --dst DIR` writes every note/text in a named project into a
+clean directory. It does not require `.mem.toml`, does not read `origin`, and
+does not update `origin`.
+
+```bash
+mem export demo --dst D:\backup\demo-notes
+```
+
+`--dst` must be missing or empty and must not have a `.mem.toml` ancestor. Export
+preserves the ID tree:
+
+```text
+notes/a.md
+notes/b.txt
+```
+
+Neither command creates a server commit. Export leaves its files unregistered;
+use `mem add` or `mem mv` if they should become authoring files. Both commands
+are deliberately non-overwriting, so there is no `--force` or conflict-marker
+session.
 
 ## Local origin policy
 
