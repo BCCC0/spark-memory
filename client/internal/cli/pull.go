@@ -134,21 +134,25 @@ func pullCommand(o options, c config.Config, cl *transport.Client) (any, string,
 		seen[noteID] = true
 		origin := object(row["origin"])
 		pointer := stringField(origin, "pointer")
+		originPath := stringField(origin, "path")
 		if len(requested) == 0 && stringField(origin, "device") != own {
 			continue
 		}
-		if stringField(origin, "device") != own || pointer == "" {
+		if stringField(origin, "device") != own || (pointer == "" && originPath == "") {
 			damaged = append(damaged, map[string]any{"id": noteID, "reason": "missing_origin"})
 			continue
 		}
-		parsed, err := pointers.Parse(pointer, false, "")
-		if err != nil {
-			damaged = append(damaged, map[string]any{"id": noteID, "reason": "missing_origin"})
-			continue
+		if originPath == "" {
+			parsed, err := pointers.Parse(pointer, false, "")
+			if err != nil {
+				damaged = append(damaged, map[string]any{"id": noteID, "reason": "missing_origin"})
+				continue
+			}
+			originPath = parsed.Path
 		}
-		target, reason := pullTarget(parsed.Path, root)
+		target, reason := pullTarget(originPath, root)
 		if reason != "" {
-			damaged = append(damaged, map[string]any{"id": noteID, "path": parsed.Path, "reason": reason})
+			damaged = append(damaged, map[string]any{"id": noteID, "path": originPath, "reason": reason})
 			continue
 		}
 		if info, err := os.Stat(target); err == nil {
