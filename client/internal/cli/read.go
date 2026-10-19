@@ -322,11 +322,21 @@ func readOne(o options, c config.Config, cl *transport.Client, raw string) (any,
 	if err != nil {
 		return nil, "", err
 	}
+	linkOnly := o.has("link-only")
+	if linkOnly && (section != "" || span != "" || strings.Contains(raw, "#") || strings.Contains(raw, ":")) {
+		return nil, "", memerr.New("usage_error", "--link-only applies to whole notes; a section or range always inlines", map[string]any{"id": id})
+	}
+	if o.has("outline") && linkOnly {
+		return nil, "", memerr.New("usage_error", "--link-only does not apply to --outline; an outline has no body", map[string]any{"id": id})
+	}
 	if o.has("outline") && (strings.Contains(raw, "#") || strings.Contains(raw, ":")) {
 		return nil, "", memerr.New("usage_error", "--outline returns headings only; a section or range does not apply", map[string]any{"id": id})
 	}
 	path := "/v1/notes/" + escapeID(id)
 	q := map[string]string{"project": c.Project, "revision": rev, "section": section, "range": span, "max_bytes": fmt.Sprint(c.MaxBytes)}
+	if linkOnly {
+		q["link_only"] = "true"
+	}
 	if o.has("outline") {
 		path = "/v1/outline"
 		q = map[string]string{"project": c.Project, "id": id, "revision": rev}
@@ -394,13 +404,17 @@ func readOne(o options, c config.Config, cl *transport.Client, raw string) (any,
 		r["truncated"] = true
 		r["deferred_by_client"] = true
 	}
-	if r["truncated"] == true {
+	if r["truncated"] == true && r["link_only"] != true {
 		if size, ok := r["bytes"].(float64); ok && size > float64(c.MaxBytes) {
 			r["deferred_by_client"] = true
 		}
 	}
-	annotateFreshness(r)
-	if kind := stringField(r, "kind"); kind == "file" || kind == "dir" || kind == "locked" {
+	kind := stringField(r, "kind")
+	if kind != "file" && kind != "dir" && kind != "locked" {
+		annotateFreshness(r)
+		stripFreshnessHashes(r)
+	}
+	if kind == "file" || kind == "dir" || kind == "locked" {
 		state := "resolvable on this device"
 		if r["local_resolvable"] != true {
 			device := stringField(r, "points_at")
@@ -417,71 +431,89 @@ func readOne(o options, c config.Config, cl *transport.Client, raw string) (any,
 	return r, fmt.Sprintf("%s is %s bytes; %s", id, str(r["bytes"]), freshnessLine(r)), nil
 }
 func freshnessLine(r map[string]any) string {
+	line := "fetch: " + stringField(r, "fetch_url")
 	switch stringField(r, "source") {
 	case "local":
-		return "working file is newer: " + stringField(r, "origin_path")
+		line = "working file is newer: " + stringField(r, "origin_path")
 	case "same":
-		return "working file matches the committed revision: " + stringField(r, "origin_path")
+		line = "working file matches the committed revision: " + stringField(r, "origin_path")
 	case "server":
 		if stringField(r, "origin_path") != "" {
-			return "committed revision is newer than your working file (" + stringField(r, "origin_path") + "); fetch: " + stringField(r, "fetch_url")
+			line = "committed revision is newer than your working file (" + stringField(r, "origin_path") + "); fetch: " + stringField(r, "fetch_url")
 		}
 	}
-	return "fetch: " + stringField(r, "fetch_url")
+	if r["link_only"] == true && !strings.Contains(line, "fetch: ") && stringField(r, "fetch_url") != "" {
+		line += "; link: " + stringField(r, "fetch_url")
+	}
+	return line
 }
 func annotateFreshness(r map[string]any) {
 	origin := stringField(r, "origin_path")
-	if origin != "" && stringField(r, "content_sha256") != "" {
-		working := paths.Resolve(origin)
-		if working == "" {
-			delete(r, "origin_path")
-			r["source"] = "none"
-			r["local_file"] = false
-			return
-		}
-		data, err := os.ReadFile(working)
-		if err != nil {
-			delete(r, "origin_path")
-			r["source"] = "none"
-			r["local_file"] = false
-			return
-		}
-		info, err := os.Stat(working)
-		if err != nil {
-			delete(r, "origin_path")
-			r["source"] = "none"
-			r["local_file"] = false
-			return
-		}
-		whole := sha256.Sum256(data)
-		body := bodyOnly(string(data))
-		body = strings.TrimRight(body, "\n")
-		bodyHash := sha256.Sum256([]byte(body))
-		r["origin_path"] = working
-		r["local_file"] = true
-		r["local_sha256"] = hex.EncodeToString(whole[:])
-		r["local_body_sha256"] = hex.EncodeToString(bodyHash[:])
-		r["local_bytes"] = info.Size()
-		r["local_mtime"] = float64(info.ModTime().UnixNano()) / 1e9
-		if stringField(r, "body_sha256") != "" && stringField(r, "body_sha256") == hex.EncodeToString(bodyHash[:]) {
-			r["source"] = "same"
-			r["body_matches"] = true
-		} else {
-			r["body_matches"] = false
-			r["source"] = "server"
-			if stamp := stringField(r, "note_updated"); stamp != "" {
-				if when, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
-					if info.ModTime().After(when) {
-						r["source"] = "local"
-					}
-					r["timestamp_basis"] = "mtime_vs_commit_time"
-				}
-			}
-		}
-	} else if stringField(r, "fetch_url") != "" {
+	if origin == "" {
+		// The field is always present for a non-pointer read: without it a
+		// `source` value would be ambiguous (the skill tells callers to read
+		// `local_file` first).
 		r["source"] = "none"
 		r["local_file"] = false
+		return
 	}
+	working := paths.Resolve(origin)
+	if working == "" {
+		delete(r, "origin_path")
+		r["source"] = "none"
+		r["local_file"] = false
+		return
+	}
+	data, err := os.ReadFile(working)
+	if err != nil {
+		delete(r, "origin_path")
+		r["source"] = "none"
+		r["local_file"] = false
+		return
+	}
+	info, err := os.Stat(working)
+	if err != nil {
+		delete(r, "origin_path")
+		r["source"] = "none"
+		r["local_file"] = false
+		return
+	}
+	body := strings.TrimRight(bodyOnly(string(data)), "\n")
+	bodyHash := sha256.Sum256([]byte(body))
+	r["origin_path"] = working
+	r["local_file"] = true
+	r["local_bytes"] = info.Size()
+	r["local_mtime"] = float64(info.ModTime().UnixNano()) / 1e9
+	committed := stringField(r, "body_sha256")
+	if committed == "" {
+		r["source"] = "none"
+		return
+	}
+	if committed == hex.EncodeToString(bodyHash[:]) {
+		r["source"] = "same"
+		r["body_matches"] = true
+		return
+	}
+	r["body_matches"] = false
+	r["source"] = "server"
+	if stamp := stringField(r, "note_updated"); stamp != "" {
+		if when, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+			if info.ModTime().After(when) {
+				r["source"] = "local"
+			}
+			r["timestamp_basis"] = "mtime_vs_commit_time"
+		}
+	}
+}
+
+// stripFreshnessHashes removes the inputs to the local comparison. `sha256`
+// stays: it identifies the committed file and is what `--expect` takes. The
+// body and local hashes are implementation detail, not part of the CLI contract.
+func stripFreshnessHashes(r map[string]any) {
+	delete(r, "body_sha256")
+	delete(r, "content_sha256")
+	delete(r, "local_sha256")
+	delete(r, "local_body_sha256")
 }
 func bodyOnly(text string) string {
 	lines := strings.Split(text, "\n")

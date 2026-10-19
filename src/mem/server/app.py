@@ -441,6 +441,7 @@ def build_record(
     alias_for_device: Any = None,
     section: str | None = None,
     range: tuple[int, int] | None = None,
+    link_only: bool = False,
 ) -> dict[str, Any]:
     rel = repo.public_path(project, note_id, revision)
     try:
@@ -471,6 +472,10 @@ def build_record(
         return result
     is_text_file = not rel.endswith(".md")
     data, body = ({}, text) if is_text_file else fm.parse(text)
+    # Hashing happens over the whole note, before a slice narrows the body the
+    # caller receives. Freshness is a property of the committed revision, not of
+    # the fragment this particular read asked for.
+    whole_body = body
     errors: list[str] = []
     if not is_text_file:
         try:
@@ -514,6 +519,10 @@ def build_record(
     # working file rather than being told which copy is authoritative.
     meta_updated = repo.note_updated(rel, revision)
     truncated = False if sliced else size > max_bytes
+    # A "handoff" is a read whose body is not inlined and therefore needs a URL.
+    # A slice is not a handoff: it always inlines the bounded fragment it named.
+    handoff = truncated or (link_only and not sliced)
+    origin_path = origin.get("path")
 
     record: dict[str, Any] = {
         "id": note_id,
@@ -546,9 +555,12 @@ def build_record(
         # A slice bypasses the cap (S35 D2): C1 exists to stop a WHOLE note flooding a
         # client, and a caller that named a section has already bounded the cost.
         "truncated": truncated,
+        # The body was omitted by request, not by the cap. Keeping this separate
+        # from `truncated` lets a caller tell a deliberate link-only read from a
+        # size-driven handoff.
+        **({"link_only": True} if link_only and not sliced else {}),
     }
-    if truncated and not sliced:
-        origin_path = origin.get("path")
+    if handoff:
         # The committed revision is ALWAYS addressable, and always identified by
         # its bytes. `local_path`/`fetch_url` used to be mutually exclusive, which
         # left the origin device unable to reach the committed revision at all --
@@ -563,32 +575,29 @@ def build_record(
             )
         else:
             record["fetch_url"] = _link_url(settings, project, note_id)
-        # Same hash the `sha256` field above carries, repeated under the name the
-        # caller compares against its own working copy. Path-independent, so a
-        # client on either OS can use it without translating anything.
-        record["content_sha256"] = record["sha256"]
-        # Body-only hash: what the author edits, with the server-owned frontmatter
-        # excluded. This is the one a caller can meaningfully compare its working
-        # file against (see `_body_only`). Trailing blank lines are normalised
-        # away: whether a file ends in a newline is not an author edit, and the
-        # write path already strips it, so comparing raw bodies would report a
-        # difference the author never made.
-        record["body_sha256"] = hashlib.sha256(
-            _body_only(body if not sliced else text).rstrip("\n").encode("utf-8")
-        ).hexdigest()
 
-        if origin_path and _looks_like_location(str(origin_path)):
-            if same_origin_device:
-                # The caller's OWN working file, recorded when it was uploaded. It
-                # is a hint, not the committed revision: the file may have moved or
-                # changed since. The client hashes it and reports which is fresher.
-                record["origin_path"] = str(origin_path)
-                record["note_updated"] = meta_updated
-            elif alias_for_device:
-                author_alias = alias_for_device(str(origin.get("device") or ""))
-                if author_alias:
-                    record["origin_pointer"] = f"@file({author_alias}:{origin_path})"
-    if sliced or size <= max_bytes:
+    # Body-only hash: what the author edits, with the server-owned frontmatter
+    # excluded. This is the one a caller can meaningfully compare its working
+    # file against (see `_body_only`). It is computed from the WHOLE body even
+    # when the response carries a slice, so freshness does not change with the
+    # selector the caller used. Trailing blank lines are normalised away:
+    # whether a file ends in a newline is not an author edit.
+    record["body_sha256"] = hashlib.sha256(
+        _body_only(whole_body).rstrip("\n").encode("utf-8")
+    ).hexdigest()
+
+    if origin_path and _looks_like_location(str(origin_path)):
+        if same_origin_device:
+            # The caller's OWN working file, recorded when it was uploaded. It
+            # is a hint, not the committed revision: the file may have moved or
+            # changed since. The client hashes it and reports which is fresher.
+            record["origin_path"] = str(origin_path)
+            record["note_updated"] = meta_updated
+        elif alias_for_device and handoff:
+            author_alias = alias_for_device(str(origin.get("device") or ""))
+            if author_alias:
+                record["origin_pointer"] = f"@file({author_alias}:{origin_path})"
+    if sliced or (size <= max_bytes and not link_only):
         record["body"] = body
     return record
 
@@ -1149,6 +1158,7 @@ def create_app(settings: Settings) -> Starlette:
         section = params.get("section")
         raw_range = params.get("range")
         span = _parse_range(raw_range) if raw_range else None
+        link_only = (params.get("link_only") or "").lower() in {"1", "true", "yes"}
 
         def _build() -> dict[str, Any]:
             return snapshot(build_record,
@@ -1167,6 +1177,7 @@ def create_app(settings: Settings) -> Starlette:
                 alias_for_device=registry.alias_for,
                 section=section,
                 range=span,
+                link_only=link_only,
             )
 
         record = await asyncio.to_thread(_build)

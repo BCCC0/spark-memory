@@ -80,3 +80,62 @@ until its `pending` hint disappears. A successful read then returns the
 committed revision. To
 observe search freshness, inspect both the queue hint and index-lag indicator;
 an empty result alone is not proof that a queued addition is absent.
+
+## Reading a note: whole, slice, link-only
+
+`mem read ID` asks for the whole note. The server inlines the body when it fits
+the read cap; otherwise it returns metadata plus a signed `fetch_url`.
+
+`mem read ID:5-10` and `mem read ID#Section` ask for a bounded slice. A slice
+always inlines that fragment, even when the whole note is over the cap.
+
+`mem read ID --link-only` asks the server to omit the whole body even when it
+would fit. The response has `link_only: true`, `truncated` still describes the
+cap honestly (usually `false`), and `fetch_url` is present. `--link-only` cannot
+be combined with a slice or `--outline`.
+
+Every non-pointer read with a resolvable local origin reports:
+
+| field | meaning |
+| --- | --- |
+| `origin_path` | the working file on this device |
+| `local_file` | whether that file exists and was read |
+| `body_matches` | whether the local prose body matches the committed prose body |
+| `source` | `same`, `local`, `server`, or `none` |
+| `note_updated` | the committed revision's timestamp |
+| `timestamp_basis` | present only when an mtime comparison decided `local` vs `server` |
+
+`sha256` identifies the committed file and is the value `mem add --expect`
+takes. It is never used to judge freshness: the server owns frontmatter and
+rewrites it on upload, so a working file can differ in bytes while its prose is
+unchanged. The body-only hash and the local hashes are implementation detail and
+are not printed by the CLI.
+
+A slice's `body_matches` compares the whole local file's prose with the whole
+committed body, not with the returned fragment. This is deliberate: a partial
+view must not hide whether the authoring copy is current.
+
+## Local origin policy
+
+An inline upload records where its content came from on **this** device. That
+path must be inside the project root — the directory containing `.mem.toml`.
+
+```text
+mem add notes/design.md                 # accepted: inside the root
+mem add %TEMP%\draft.md --as design     # refused: origin_outside_root (exit 4)
+mem add %TEMP%\draft.md --as design --no-origin
+```
+
+The default refusal is a hard error, not a warning. The escape hatches are
+distinct:
+
+- copy the file under the project root;
+- use `mem pointer add` for an outside file that is a **reference**, not
+  content;
+- use `--no-origin` to store content without a local authoring link. Outside
+  content still needs `--as` because the id cannot be derived from a path
+  outside the root.
+
+Paths are resolved before comparison, so `..` and symlinks that escape the root
+are refused. UNC origins are refused on Windows. `mem hook` applies the same
+rule to captured files.

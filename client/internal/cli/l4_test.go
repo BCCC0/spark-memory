@@ -63,6 +63,10 @@ func TestReadCommandsAgainstFakeDaemon(t *testing.T) {
 	if read.JSON["body"] != "hello" {
 		t.Errorf("read: %v", read.JSON)
 	}
+	env.MustMem("read", "ops/boot", "--link-only")
+	if got := d.LastRequest(t).Query.Get("link_only"); got != "true" {
+		t.Errorf("link-only query = %q", got)
+	}
 	if got := d.Requests()[len(d.Requests())-1].RawPath; got != "/v1/notes/ops/boot" {
 		t.Errorf("nested id was escaped: %q", got)
 	}
@@ -116,6 +120,16 @@ func TestWriteCommandsAgainstFakeDaemon(t *testing.T) {
 	}
 	if !strings.Contains(string(last.Body), `name="project"`) || !strings.Contains(string(last.Body), `filename="a.md"`) {
 		t.Errorf("add body: %s", last.Body)
+	}
+	if !strings.Contains(string(last.Body), `name="origin_path"`) {
+		t.Errorf("add without --no-origin should record an origin: %s", last.Body)
+	}
+
+	env.Write("no-origin.md", "---\nsummary: no-origin\n---\nbody\n")
+	env.MustMem("add", "no-origin.md", "--as", "no-origin", "--no-origin")
+	last = d.LastRequest(t)
+	if strings.Contains(string(last.Body), `name="origin_path"`) {
+		t.Errorf("--no-origin sent an origin: %s", last.Body)
 	}
 
 	env.Write("b.md", "---\nsummary: b\n---\nbody\n")
@@ -209,7 +223,7 @@ func TestExitCodeMatrix(t *testing.T) {
 		"lock_held": 3, "lock_timeout": 3, "target_busy": 3, "queue_full": 3,
 		"queued_write_failed": 1, "schema_invalid": 4, "staging_diverged": 5,
 		"no_project": 6, "stale_revision": 7, "target_moved": 9, "not_found": 9,
-		"invalid_request": 4, "internal_error": 1, "usage_error": 64,
+		"invalid_request": 4, "origin_outside_root": 4, "internal_error": 1, "usage_error": 64,
 	}
 	for code, want := range cases {
 		err := memerr.New(code, "test", nil)

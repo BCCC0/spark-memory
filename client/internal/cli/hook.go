@@ -553,7 +553,7 @@ func prepareCapture(repo, rev, path string, c config.Config, policy map[string]a
 	if err != nil {
 		return it, err
 	}
-	it.ID, it.Filename, it.Path, it.Origin = id, filepath.Base(working), path, working
+	it.ID, it.Filename, it.Path = id, filepath.Base(working), path
 	ext := strings.ToLower(filepath.Ext(working))
 	allowed := false
 	if values, ok := policy["inline_extensions"].([]any); ok {
@@ -564,6 +564,11 @@ func prepareCapture(repo, rev, path string, c config.Config, policy map[string]a
 		}
 	}
 	if allowed {
+		origin, err := requireOriginInside(working, filepath.Dir(c.MarkerPath))
+		if err != nil {
+			return it, err
+		}
+		it.Origin = origin
 		content, err := tracking.Git(repo, "show", rev+":"+path)
 		if err != nil {
 			return it, err

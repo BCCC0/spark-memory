@@ -222,4 +222,31 @@ def test_a_file_outside_the_marker_is_refused_not_renamed_to_its_basename(ready,
 
     result = ready.cli("add", str(outside / "stray.md"))
     assert result.returncode == 4, result.stderr
+    assert "origin_outside_root" in result.stderr
     assert "outside the project root" in result.stderr
+
+
+def test_a_slice_reports_freshness_against_the_whole_note(ready):
+    text = note_text(summary="slice-fresh", body="one\ntwo\nthree\nfour")
+    source = ready.write("slice-fresh.md", text)
+    source.write_text(text, encoding="utf-8", newline="\n")
+    ready.cli_json("add", "slice-fresh.md", "--as", "slice-fresh")
+
+    record = ready.cli_json("read", "slice-fresh:4-5")
+    assert record["body"] == "two\nthree"
+    assert record["local_file"] is True
+    assert record["body_matches"] is True, "the whole working file still matches"
+    assert record["source"] == "same"
+    assert record["origin_path"] == str(source)
+    assert "body_sha256" not in record
+    assert "local_sha256" not in record
+
+    source.write_text(
+        note_text(summary="slice-fresh", body="one\ntwo changed\nthree\nfour"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    changed = ready.cli_json("read", "slice-fresh:4-5")
+    assert changed["body_matches"] is False
+    assert changed["source"] in {"local", "server"}
+    assert changed["body"] == "two\nthree", "the slice itself is unchanged"

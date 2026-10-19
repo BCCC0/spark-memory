@@ -1,6 +1,6 @@
 {
   "generator": "tools/gen_client_vectors.py",
-  "source_revision": "sha256:ca1de5daaf6efeb545bc58b21f66600ebbb963c4151fc299a965000336bb7106",
+  "source_revision": "sha256:b5ac69dee4521246fcab31bee208525011319b080192812e0aa1c875a5af6ca4",
   "error_table": {
     "unauthorized": [
       401,
@@ -59,6 +59,10 @@
       9
     ],
     "invalid_request": [
+      400,
+      4
+    ],
+    "origin_outside_root": [
       400,
       4
     ],

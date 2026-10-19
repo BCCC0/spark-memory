@@ -30,4 +30,8 @@ credentials
 deploy_manifest
 deployment/
 issue/
+# Local working notes for planned work; not part of the published tree.
+todos/
+# Local Git hooks, installed with: git config core.hooksPath .githooks
+.githooks/
 tools/mcp_auth_probe/
