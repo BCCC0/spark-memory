@@ -24,6 +24,28 @@ def test_pull_restores_every_missing_owned_file(ready):
     assert record["body_matches"] is True
 
 
+def test_unknown_project_fails_loudly(ready, tmp_path):
+    bad = tmp_path / "bad-project"
+    bad.mkdir()
+    (bad / ".mem.toml").write_text('project = "no-such-project"\n', encoding="utf-8")
+    destination = tmp_path / "empty-destination"
+
+    status = ready.cli("status", cwd=bad)
+    assert status.returncode == 6, status.stderr
+    assert "no_project" in status.stderr
+
+    pull = ready.cli("pull", cwd=bad)
+    assert pull.returncode == 6, pull.stderr
+    assert "no_project" in pull.stderr
+
+    export = ready.cli(
+        "export", "no-such-project", "--dst", str(destination), cwd=bad
+    )
+    assert export.returncode == 6, export.stderr
+    assert "no_project" in export.stderr
+    assert not destination.exists()
+
+
 def test_pull_default_skips_other_device_notes(ready):
     from mem.client import Client
 

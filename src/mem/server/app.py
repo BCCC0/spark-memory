@@ -57,7 +57,7 @@ from starlette.routing import Route
 from ..errors import MemError
 from ..ids import note_relpath, text_relpath, split_public_path, validate_id, validate_project
 from ..pointers import pointer_record
-from ..version import API_VERSION
+from ..version import API_VERSION, build_commit
 from . import embedding
 from . import frontmatter as fm
 from .auth import DeviceRegistry
@@ -471,7 +471,7 @@ def _body_only(text: str) -> str:
     can contain a literal ``---`` -- which silently hashed frontmatter as if it
     were body.
     """
-    lines = text.split("\n")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     if not lines or lines[0].strip() != "---":
         return text
     for index in range(1, len(lines)):
@@ -636,7 +636,11 @@ def build_record(
     # selector the caller used. Trailing blank lines are normalised away:
     # whether a file ends in a newline is not an author edit.
     record["body_sha256"] = hashlib.sha256(
-        _body_only(whole_body).rstrip("\n").encode("utf-8")
+        _body_only(whole_body)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .rstrip("\n")
+        .encode("utf-8")
     ).hexdigest()
 
     if origin_path and _looks_like_location(str(origin_path)):
@@ -1050,7 +1054,8 @@ def create_app(settings: Settings) -> Starlette:
         # liveness probe cannot stall every concurrent request.
         head = await asyncio.to_thread(repo.head)
         return JSONResponse(
-            {"ok": True, "version": API_VERSION, "head": head}
+            {"ok": True, "version": API_VERSION, "head": head,
+             "commit": build_commit()}
         )
 
     async def policy(request: Request) -> JSONResponse:
@@ -1077,6 +1082,8 @@ def create_app(settings: Settings) -> Starlette:
         project = request.query_params.get("project")
         if project:
             validate_project(project)
+            if project not in repo.project_names():
+                raise MemError("no_project", f"no such project: {project}", {"project": project})
         def _status() -> dict[str, Any]:
             with repo.pinned():
                 head = repo.head()
@@ -1091,6 +1098,7 @@ def create_app(settings: Settings) -> Starlette:
                 # commit's message instead of a staging list.
                 "message": message,
                 "server": API_VERSION,
+                "commit": build_commit(),
                 "lock": lock.state(),
                 "index": {
                     "present": indexed_head is not None,
@@ -1151,6 +1159,8 @@ def create_app(settings: Settings) -> Starlette:
         project = params.get("project")
         if project:
             validate_project(project)
+            if project not in repo.project_names():
+                raise MemError("no_project", f"no such project: {project}", {"project": project})
         # OFF THE LOOP. `list_records` calls `known_ids()` and `repo.notes()`, each of
         # which walks the whole git history through a `git log --name-only` subprocess.
         # On the loop, concurrent `ls` calls starve everything else: measured, 30

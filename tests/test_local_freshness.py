@@ -185,6 +185,23 @@ def test_a_client_supplied_limit_is_attributed_to_the_client(ready):
     assert record["source"] in {"local", "server", "same", "none"}
 
 
+def test_crlf_line_endings_do_not_break_freshness(ready):
+    """A Windows editor writes CRLF; the prose is still the committed prose."""
+    source = ready.write("crlf.md", note_text(summary="crlf", body="line one\nline two"))
+    # Write explicitly as CRLF, independent of the host default.
+    source.write_bytes(
+        note_text(summary="crlf", body="line one\nline two")
+        .replace("\n", "\r\n")
+        .encode("utf-8")
+    )
+    ready.cli_json("add", "crlf.md", "--as", "crlf")
+
+    record = ready.cli_json("read", "crlf")
+    assert record["local_file"] is True
+    assert record["body_matches"] is True
+    assert record["source"] == "same"
+
+
 @pytest.mark.parametrize("body_bytes", [200, 3000])
 def test_a_note_under_the_cap_still_reports_freshness(ready, body_bytes):
     """The inline cap must not gate the freshness metadata."""

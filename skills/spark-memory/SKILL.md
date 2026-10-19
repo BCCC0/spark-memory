@@ -181,9 +181,11 @@ files alone. For a topic move, end both IDs in `/` (for example
 project root, in another project, ambiguous, or owned by another device.
 
 `mem pull` restores only **missing** files in the current project; it never
-overwrites an existing file. `mem export PROJECT --dst DIR` writes the whole
-project into an empty directory. Export does not need `.mem.toml`, does not read
-origins, and does not register the exported files as authoring copies.
+overwrites an existing file. Inline text files (`.txt`) have no YAML frontmatter
+and therefore no origin; they are content-only and cannot be restored by pull.
+`mem export PROJECT --dst DIR` writes the whole project into an empty directory.
+Export does not need `.mem.toml`, does not read origins, and does not register
+the exported files as authoring copies.
 
 ## What a note looks like
 

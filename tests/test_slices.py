@@ -119,13 +119,12 @@ def test_a_slice_bypasses_the_inline_cap_and_a_whole_read_does_not(ready):
     assert sliced["range"] == [1, 1]
     assert "body" in sliced
 
-    # The server honours the slice, but the CLIENT may still decline what it is
-    # willing to take inline (B2) — and the two are distinguishable, which is the
-    # point of `deferred_by_client`.
+    # A named slice always inlines, even when it spans more than the client's
+    # advisory cap. Only a whole read may be deferred.
     huge = ready.cli_json("read", "big:3-3")
-    assert huge["truncated"] is True
-    assert huge["deferred_by_client"] is True, "the client declined it, not the server"
-    assert "body" not in huge
+    assert huge["truncated"] is False
+    assert "deferred_by_client" not in huge
+    assert huge["body"]
 
 
 def test_a_range_outside_the_note_is_refused_not_clamped(ready):
@@ -224,6 +223,16 @@ def test_a_file_outside_the_marker_is_refused_not_renamed_to_its_basename(ready,
     assert result.returncode == 4, result.stderr
     assert "origin_outside_root" in result.stderr
     assert "outside the project root" in result.stderr
+
+
+def test_a_large_slice_is_not_stripped_by_the_client_cap(ready):
+    ready.write("huge-slice.md", note_text(summary="huge", body="x" * 9000))
+    ready.cli_json("add", "huge-slice.md", "--as", "huge-slice")
+
+    record = ready.cli_json("read", "huge-slice:3-3")
+    assert record["truncated"] is False
+    assert record["body"] == "x" * 9000
+    assert "deferred_by_client" not in record
 
 
 def test_a_slice_reports_freshness_against_the_whole_note(ready):
