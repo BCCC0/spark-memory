@@ -116,7 +116,12 @@ class Catalog:
             status = data.get("status")
             note_type = data.get("type")
             tags = data.get("tags") or []
-            links = sorted({target for target in fm.note_links(body)}) if not is_text_file else []
+            links = set(fm.note_links(body)) if not is_text_file else set()
+            for key in ("supersedes", "superseded_by"):
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    links.add(value)
+            links = sorted(links)
             warnings = [] if is_text_file else fm.content_warnings(data, body)
         made, changed, who, subject = times.get(path, ("", "", "", ""))
         return (

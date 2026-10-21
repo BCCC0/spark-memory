@@ -161,6 +161,25 @@ class WriteQueue:
         # to retry. The publisher checks prepared_head before replaying it.
         with self._guard, self._connect() as db:
             db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
+            self._prune(db)
+
+    def _prune(self, db: sqlite3.Connection, keep_days: int = 30) -> int:
+        """Drop terminal jobs (and their targets) past a bounded age.
+
+        `job_targets` is otherwise never pruned, and `progress()` scans it for
+        every failed job; unbounded growth turns a routine flush into a table
+        walk. Idempotency rows are kept for recent jobs only, which is the same
+        window the queue is allowed to replay.
+        """
+        cutoff = time.time() - keep_days * 86400
+        stale = [row["id"] for row in db.execute(
+            "SELECT id FROM jobs WHERE status IN ('committed','failed') AND created < ?",
+            (cutoff,),
+        )]
+        for receipt in stale:
+            db.execute("DELETE FROM job_targets WHERE job_id=?", (receipt,))
+            db.execute("DELETE FROM jobs WHERE id=?", (receipt,))
+        return len(stale)
 
     def release_worker(self) -> None:
         handle = self._worker_handle
@@ -293,17 +312,9 @@ class WriteQueue:
             db.execute("UPDATE jobs SET prepared_head=?, prepared_result=? WHERE id=?",
                        (head, json.dumps(result), receipt))
 
-    # BUG(medium): terminal jobs are never pruned, so the queue database grows without
-    # bound.
-    # Why valid: `finish` clears only `targets` (the live reservation table); `jobs` and
-    # `job_targets` rows are retained forever, and the `MAX_JOBS` guard counts only
-    # `queued`/`running` rows (`submit`), so no retention bound is ever enforced. The
-    # failure query in `progress` then scans `job_targets` once per failed job. The same
-    # method also risks the mirror image of its own cleanup: a crash between the UPDATE
-    # and the `rmtree` leaks a spool directory, and `__init__` only creates directories,
-    # so nothing sweeps it.
-    # Fix hint: delete or archive terminal rows past a bounded window while keeping the
-    # idempotency lookup answerable, and sweep orphaned spool directories at startup.
+    # Terminal rows are pruned by `_prune` at publisher start, so `progress()`
+    # stays bounded. A crash between the UPDATE and the `rmtree` can still leak
+    # a spool directory; `__init__` only creates directories.
     def finish(self, receipt: str, *, result: dict[str, Any] | None = None,
                error: dict[str, Any] | None = None) -> None:
         with self._guard, self._connect() as db:

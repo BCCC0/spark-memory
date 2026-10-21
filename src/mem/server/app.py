@@ -1075,10 +1075,16 @@ class Reindexer:
     one batching loop*, not a queue. There was less to copy than the note implied.
     """
 
-    def __init__(self, repo: MemoryRepo, index: SearchIndex, vectors: Any) -> None:
+    def __init__(self, repo: MemoryRepo, index: SearchIndex, vectors: Any,
+                 catalog: Any | None = None) -> None:
         self._repo = repo
         self._index = index
         self._vectors = vectors
+        self._catalog = catalog
+        # path -> (sha256, parsed NoteSource): a pass re-reads only notes whose
+        # committed bytes changed, so a one-note write no longer spawns one
+        # `git show` per note in the corpus.
+        self._source_cache: dict[str, tuple[str, Any]] = {}
         self._event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._failure_delay = 0.0
@@ -1163,14 +1169,38 @@ class Reindexer:
         """
         with self._repo.pinned():
             head = self._repo.head()
-            self._index.ensure(self._repo, head)
+            if self._index.indexed_head() != head:
+                # Safety net: the write path already advanced it, so this only
+                # fires for an external commit or a schema rebuild.
+                self._index.ensure(self._repo, head)
             if self._vectors is None:
                 return
             metas = self._repo.notes()
-            bodies = self._repo.read_notes([meta.path for meta in metas])
-            sources = {
-                meta.path: note_source(self._repo, meta.path, bodies.get(meta.path))
-                for meta in metas
+            hashes: dict[str, str] = {}
+            if self._catalog is not None:
+                hashes = {
+                    row["path"]: row["sha256"] or ""
+                    for row in self._catalog.rows()
+                }
+            stale = [
+                meta for meta in metas
+                if self._source_cache.get(meta.path, ("", None))[0] != hashes.get(meta.path, "")
+            ]
+            bodies = self._repo.read_notes([meta.path for meta in stale]) if stale else {}
+            sources: dict[str, Any] = {}
+            for meta in metas:
+                sha = hashes.get(meta.path, "")
+                cached = self._source_cache.get(meta.path)
+                if cached is not None and sha and cached[0] == sha:
+                    sources[meta.path] = cached[1]
+                    continue
+                source = note_source(self._repo, meta.path, bodies.get(meta.path))
+                sources[meta.path] = source
+                if sha:
+                    self._source_cache[meta.path] = (sha, source)
+            alive = {meta.path for meta in metas}
+            self._source_cache = {
+                path: entry for path, entry in self._source_cache.items() if path in alive
             }
         self._vectors.sync(
             metas, sources.__getitem__, head
@@ -1218,7 +1248,7 @@ def create_app(settings: Settings) -> Starlette:
     if not settings.secret:
         settings.secret = _load_or_create_secret(settings.enroll_secret)
 
-    reindexer = Reindexer(repo, index, vectors)
+    reindexer = Reindexer(repo, index, vectors, catalog)
     write_queue = WriteQueue(settings.state_dir, settings.repo_root)
     queue_wake = asyncio.Event()
 
@@ -2173,7 +2203,7 @@ def create_app(settings: Settings) -> Starlette:
                 if cached is not None:
                     return _replay_result(cached)
             if dry_run:
-                plan = snapshot(plan_move, repo, project, source, destination, folder=folder)
+                plan = snapshot(plan_move, repo, project, source, destination, folder=folder, catalog=catalog)
                 if expected_head and plan.head != expected_head:
                     raise MemError("stale_revision", "repository head changed",
                                    {"expected": expected_head, "actual": plan.head})
@@ -2183,7 +2213,7 @@ def create_app(settings: Settings) -> Starlette:
                     cached = store.get(key)
                     if cached is not None:
                         return _replay_result(cached)
-                plan = snapshot(plan_move, repo, project, source, destination, folder=folder)
+                plan = snapshot(plan_move, repo, project, source, destination, folder=folder, catalog=catalog)
                 if expected_head and plan.head != expected_head:
                     raise MemError("stale_revision", "repository head changed",
                                    {"expected": expected_head, "actual": plan.head})
@@ -2195,7 +2225,7 @@ def create_app(settings: Settings) -> Starlette:
         if dry_run:
             return JSONResponse(await asyncio.to_thread(_move))
         plan = await asyncio.to_thread(snapshot, plan_move, repo, project, source,
-                                       destination, folder=folder)
+                                       destination, folder=folder, catalog=catalog)
         if expected_head and plan.head != expected_head:
             raise MemError("stale_revision", "repository head changed",
                            {"expected": expected_head, "actual": plan.head})
@@ -2328,7 +2358,7 @@ def create_app(settings: Settings) -> Starlette:
             with lock.hold(manifest["device_id"]):
                 plan = plan_move(work, manifest["project"],
                                  manifest["source"], manifest["destination"],
-                                 folder=manifest["folder"])
+                                 folder=manifest["folder"], catalog=catalog)
                 if manifest["expected_head"] and plan.head != manifest["expected_head"]:
                     raise MemError("stale_revision", "repository head changed",
                                    {"expected": manifest["expected_head"], "actual": plan.head})
