@@ -8,6 +8,8 @@ import os
 import base64
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 from ..errors import MemError, not_found
 from ..ids import note_relpath, text_relpath, validate_id
@@ -96,7 +98,7 @@ def _rewrite_note(text: str, mapping: dict[str, str], note_id: str) -> bytes:
 
 
 def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
-              *, folder: bool) -> MovePlan:
+              *, folder: bool, catalog: Any | None = None) -> MovePlan:
     source = validate_id(source)
     destination = validate_id(destination)
     if source == "PROJECT" or destination == "PROJECT":
@@ -107,10 +109,18 @@ def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
         raise MemError("invalid_request", "a topic cannot move into itself")
 
     head = repo.head()
-    metas = [meta for meta in repo.notes() if meta.project == project]
-    # One batched read for the whole project: planning used to spawn two git
-    # processes per note even when the move touched one record.
-    bodies = repo.read_notes([meta.path for meta in metas])
+    if catalog is not None:
+        # The queue worker plans against the head it is about to commit, so the
+        # projection must be current before its rows are trusted.
+        catalog.ensure(repo, head)
+        rows = [row for row in catalog.rows() if row["project"] == project]
+        metas = [SimpleNamespace(id=row["note_id"], path=row["path"]) for row in rows]
+        links: dict[str, set[str]] | None = {
+            row["note_id"]: set(json.loads(row["links"] or "[]")) for row in rows
+        }
+    else:
+        metas = [meta for meta in repo.notes() if meta.project == project]
+        links = None
     selected = [meta for meta in metas if (meta.id.startswith(source + "/") if folder else meta.id == source)]
     if not selected:
         raise MemError("not_found", f"no {'topic' if folder else 'record'} at {source}")
@@ -127,7 +137,22 @@ def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
     referenced: list[str] = []
     bytes_affected = 0
 
+    # Only the moved notes and notes that actually reference one of them can
+    # change. The catalog knows both, so planning no longer reads the rest of
+    # the project (two git spawns per note was the old cost).
+    if links is not None:
+        moved_ids = set(mapping)
+        needed: set[str] | None = moved_ids | {
+            note_id for note_id, targets in links.items() if targets & moved_ids
+        }
+    else:
+        needed = None
+    to_read = [meta.path for meta in metas if needed is None or meta.id in needed]
+    bodies = repo.read_notes(to_read)
+
     for meta in metas:
+        if needed is not None and meta.id not in needed:
+            continue
         raw = bodies.get(meta.path)
         if raw is None:
             raise not_found(f"{meta.path} does not exist at {head}")

@@ -61,6 +61,7 @@ class MemoryRepo:
         # --name-only` over the whole history. It only depends on the revision,
         # so memoise it per head instead of re-running it on every call.
         self._commit_index_cache: dict[str, dict[str, tuple[str, str, str, str]]] = {}
+        self._message_cache: dict[str, str] = {}
         # Spawn accounting for tests and `/v1/status`: every git invocation in
         # this process goes through `git_bytes`, so this is the true count.
         self.git_calls = 0
@@ -222,7 +223,12 @@ class MemoryRepo:
 
     def head_message(self) -> str | None:
         """Subject of the head commit — the last change made (S24)."""
-        out = self.git("log", "-1", "--format=%s", self._revision(), check=False).strip()
+        revision = self._revision()
+        cached = self._message_cache.get(revision)
+        if cached is not None:
+            return cached or None
+        out = self.git("log", "-1", "--format=%s", revision, check=False).strip()
+        self._message_cache = {revision: out}
         return out or None
 
     def note_message(self, relpath: str) -> str | None:

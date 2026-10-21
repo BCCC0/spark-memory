@@ -634,7 +634,9 @@ class VectorIndex:
 
         # Embed in batches. The embedded text is the COMPOSED one, which is also what
         # source_hash covers — see `compose_source`.
-        for start in range(0, len(pending), 32):
+        # Small batches bound how long the shared embed lock is held, so an
+        # interactive query is not stuck behind a multi-second reindex batch.
+        for start in range(0, len(pending), 8):
             batch = pending[start : start + 32]
             vectors = embedder.embed([item[3] for item in batch])
             with self._connect() as conn:

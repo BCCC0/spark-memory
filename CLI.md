@@ -27,13 +27,13 @@ normally invoked with `uv run mem`.
 | --- | --- | --- | --- |
 | `mem add` | Check every local Markdown summary, upload bytes, and receive durable server acceptance | **Yes** for invalid format, rejected upload, full queue, or an ID already in an unfinished job | `queued` receipt on acceptance; never claims a Git commit already happened |
 | `mem rm` | Validate the request and receive durable server acceptance | **Yes** for an invalid request or busy affected ID | `queued` receipt |
-| `mem mv` | Wait for the write queue, perform the move, and wait for it to commit | **Yes**; both path and `--id` forms are blocking | Final move result, not a bare queued receipt |
+| `mem mv` | Queue the move behind already-accepted writes, then wait for that job's own commit | **Yes** for its own commit; it never waits for the project queue to empty | Final move result, or `target_busy` when another unfinished write owns the same IDs |
 | Git pre-commit hook | Check selected staged Markdown locally | **Yes** when selected Markdown has an invalid summary | Format error identifying the staged file |
 | Git post-commit / post-merge hook | Upload selected committed state and receive durable server acceptance | **No**: a sync failure is logged and does not undo the source Git operation | Accepted receipt or logged warning; a busy file requires a later manual `mem hook update` |
 | `mem read ID` | Check the committed Git snapshot and unfinished/failed writes affecting the ID | **No** waiting for the queue | Committed record, `pending` hint, or failed-write error with the last committed revision |
 | `mem read ID@REV` | Read the requested committed revision | **No** waiting for the queue | Historical record, regardless of current queued work |
 | `mem search` | Search the latest completed index | **No** waiting for writes or indexing | Hits plus a pending-write hint and index-lag indicator |
-| `mem flush` | Wait for every job accepted before the command starts and for the text index to reach the resulting head, bounded to 3 minutes | **Yes**, intentionally waits | `flushed` with a Git head, a typed error listing failed jobs, or `lock_timeout` (exit 3) when the index cannot catch up |
+| `mem flush` | Wait for every job accepted before the command starts; the text index advances in the write path, so it is already at the committed head | **Yes**, intentionally waits | `flushed` with a Git head, a typed error listing failed jobs, or `lock_timeout` (exit 3) when a job cannot commit |
 
 “Blocks” in this table means *refuses the requested action*. Uploading a large
 request and durably recording it still take time. No CLI read or search command
@@ -48,6 +48,11 @@ the earlier failure for future flushes. If the queue drains but the text index
 cannot catch up within 3 minutes, `mem flush` fails with `lock_timeout` and exit
 3 rather than waiting forever; the response and `mem index` show the reindexer's
 last error.
+
+Embeddings are not on this barrier. They run in a background pass and report
+their own lag (`index_lag`, `status.hybrid.indexed_head`); a write is durably
+committed and text-searchable before any vector is computed, and no command
+waits for one.
 
 ## Hints, warnings, and errors
 
