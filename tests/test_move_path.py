@@ -110,7 +110,7 @@ def test_path_move_rolls_back_when_the_server_commit_fails(ready, monkeypatch):
     monkeypatch.setattr(MemoryRepo, "commit_paths", fail_repath)
     result = ready.cli("mv", "notes/rollback.md", "notes/rollback-new.md")
     assert result.returncode == 1, result.stderr
-    assert "queued_write_failed" in result.stderr
+    assert "internal_error" in result.stderr
     assert source.exists()
     assert not (ready.workdir / "notes/rollback-new.md").exists()
     assert ready.cli_json("status")["head"] == head

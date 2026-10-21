@@ -5,7 +5,7 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 # API/version string reported by GET /health and used to detect a stale daemon.
 API_VERSION = "mem/0.1"

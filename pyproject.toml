@@ -1,6 +1,6 @@
 [project]
 name = "spark-memory"
-version = "0.1.2"
+version = "0.2.0"
 description = "mem — a server-owned project memory service"
 readme = "README.md"
 requires-python = ">=3.11"

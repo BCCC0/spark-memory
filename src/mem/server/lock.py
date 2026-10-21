@@ -22,10 +22,13 @@ DEFAULT_TIMEOUT = 15.0
 
 class WriteLock:
     def __init__(self, timeout: float = DEFAULT_TIMEOUT) -> None:
-        self._lock = threading.Lock()
+        # Reentrant on purpose: the inline write path takes the lock once and the
+        # per-verb commit helpers take it again in the same thread.
+        self._lock = threading.RLock()
         self._timeout = timeout
         self._holder: str | None = None
         self._since: float | None = None
+        self._depth = 0
         self._guard = threading.Lock()
 
     @property
@@ -42,13 +45,17 @@ class WriteLock:
                 {"held_by": state.get("by"), "since": state.get("since")},
             )
         with self._guard:
+            self._depth += 1
             self._holder = holder
             self._since = time.time()
 
     def release(self) -> None:
         with self._guard:
-            self._holder = None
-            self._since = None
+            self._depth -= 1
+            if self._depth <= 0:
+                self._depth = 0
+                self._holder = None
+                self._since = None
         with contextlib.suppress(RuntimeError):
             self._lock.release()
 

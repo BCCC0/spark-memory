@@ -2207,7 +2207,7 @@ def _hook_update(args: argparse.Namespace) -> int:
 
     if matched:
         try:
-            client = _client(config, args)
+            client = _client(config, args, timeout=180)
             policy = client.policy()
         except MemError as exc:
             result["errors"].append(f"{', '.join(matched)}: {exc.message}")

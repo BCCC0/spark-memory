@@ -73,8 +73,7 @@ def test_multi_add_rolls_back_if_git_ignores_one_path(ready):
     ready.write("ignored.md", note_text(summary="ignored"))
     before = ready.cli_json("status")["head"]
     failed = ready.cli("add", "good.md", "ignored.md", "-m", "both or neither")
-    assert failed.returncode == 0
-    assert ready.cli("flush").returncode == 1
+    assert failed.returncode != 0
     assert ready.cli_json("status")["head"] == before
     assert not (ready.repo / "projects/demo/good.md").exists()
     assert not (ready.repo / "projects/demo/ignored.md").exists()

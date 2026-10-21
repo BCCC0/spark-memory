@@ -45,7 +45,7 @@ def test_write_transactions_do_not_block_the_event_loop():
         Path(__file__).resolve().parents[1] / "src" / "mem" / "server" / "app.py"
     ).read_text(encoding="utf-8")
 
-    assert "result = await asyncio.to_thread(_publish_queued, job)" in source
+    assert "result = await asyncio.to_thread(\n            _run_inline," in source
 
 
 def test_model_construction_is_serialised(tmp_path):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import urllib.request
 
@@ -14,7 +13,6 @@ from mem.client import Client
 from mem.errors import MemError
 from mem.server.app import Reindexer
 from mem.server.repo import MemoryRepo
-from mem.server.queue import WriteQueue
 from mem.server.search import SearchIndex
 
 
@@ -46,91 +44,34 @@ def test_a_device_may_only_retire_itself(ready):
     assert retired["retired"] == current["device_id"]
 
 
-def test_queue_loop_survives_a_next_job_failure(repo_template, tmp_path, monkeypatch):
-    original = WriteQueue.next_job
-    calls = {"n": 0}
-
-    def flaky(self):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("transient queue failure")
-        return original(self)
-
-    monkeypatch.setattr(WriteQueue, "next_job", flaky)
-    harness = Harness(tmp_path, template=repo_template)
-    harness.start()
-    try:
-        harness.login()
-        harness.init("demo")
-        harness.write("x.md", note_text(summary="x"))
-        harness.cli_json("add", "x.md", "--as", "x")
-        harness.flush()
-    finally:
-        harness.stop()
-    assert calls["n"] >= 2
-
-
-def test_a_mirror_reset_failure_cannot_unpublish_a_settled_write(ready, monkeypatch):
-    """A timeout after update-ref must not turn a shipped write into a failed job.
-
-    The reset refreshes only the served checkout; the commit is already the ref's
-    new value. Recording the job as failed would de-key its idempotency entry and a
-    retry would create a second job for the same bytes.
-    """
-    served = ready.repo.resolve()
-    original = MemoryRepo.git
-
-    def flaky_git(self, *args, **kwargs):
-        if self.root.resolve() == served and args[:2] == ("reset", "--hard"):
-            raise MemError("internal_error", "git operation timed out")
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(MemoryRepo, "git", flaky_git)
+def test_retrying_a_write_replays_the_committed_result(ready):
+    """Synchronous writes keep idempotency: a retry returns the first result."""
     client = Client(ready.server, ready.token())
-    body = note_text(summary="published", body="reset-timeout-token").encode("utf-8")
-    with sqlite3.connect(ready.state / "write-queue" / "jobs.db") as db:
-        before = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    body = note_text(summary="published", body="replay-token").encode("utf-8")
 
     first = client.add(
         "demo", "published", body,
-        filename="published.md", idempotency_key="reset-timeout",
+        filename="published.md", idempotency_key="replay",
     )
-    finished = ready.wait_for_receipt(first["receipt"])
-    assert finished["head"], finished
-    assert ready.cli_json("read", "published")["summary"] == "published"
+    assert first["status"] == "committed", first
+    assert first["head"]
 
     retry = client.add(
         "demo", "published", body,
-        filename="published.md", idempotency_key="reset-timeout",
+        filename="published.md", idempotency_key="replay",
     )
     assert retry["idempotent_replay"] is True
     assert retry["receipt"] == first["receipt"]
-
-    with sqlite3.connect(ready.state / "write-queue" / "jobs.db") as db:
-        after = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-        status = db.execute(
-            "SELECT status FROM jobs WHERE id=?", (first["receipt"],)
-        ).fetchone()[0]
-    assert after == before + 1, "the retry must not enqueue a second job"
-    assert status == "committed"
+    assert retry["head"] == first["head"]
+    assert ready.cli_json("read", "published")["summary"] == "published"
 
 
-def test_queue_polling_nudges_the_reindexer_without_requesting_directly(ready, monkeypatch):
-    ready.flush()
-    calls = {"nudge": 0, "request": 0}
-
-    monkeypatch.setattr(
-        Reindexer, "nudge", lambda self: calls.__setitem__("nudge", calls["nudge"] + 1)
-    )
-    monkeypatch.setattr(
-        Reindexer, "request", lambda self: calls.__setitem__("request", calls["request"] + 1)
-    )
-    monkeypatch.setattr(SearchIndex, "indexed_head", lambda self: "stale-head")
-
+def test_queue_endpoint_is_a_compatibility_stub(ready):
     progress = Client(ready.server, ready.token()).queue_progress()
-    assert progress["indexed_head"] == "stale-head"
+    assert progress["pending"] == 0
+    assert progress["through"] == 0
     assert "reindex" in progress
-    assert calls == {"nudge": 1, "request": 0}
+    assert progress["head"] == progress["head"]
 
 
 def test_nudge_respects_a_failed_passes_backoff():

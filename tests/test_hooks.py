@@ -221,8 +221,8 @@ def test_hook_splits_more_than_100_files_into_server_sized_batches(ready, tracke
     head = _commit(tracked, "many files")
 
     result = ready.cli_json("hook", "update", "--repo", str(tracked), cwd=tracked)
+    assert result["errors"] == [], result["errors"]
     assert len(result["added"]) == 101, result
-    assert result["errors"] == []
     monkeypatch.setenv("MEM_CONFIG_DIR", str(ready.config_dir))
     assert tracking.read_watermark(tracked) == head
 

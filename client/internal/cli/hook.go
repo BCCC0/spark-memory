@@ -463,7 +463,7 @@ func hookUpdate(o options) (any, string, error) {
 		return result, strings.Join(lines, "\n"), nil
 	}
 	if len(active) > 0 {
-		cl, e := client(o, c, 20e9)
+		cl, e := client(o, c, 180e9)
 		if e != nil {
 			addError(e.Error())
 			return result, "", nil
