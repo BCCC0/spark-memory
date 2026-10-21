@@ -199,10 +199,9 @@ def test_a_write_git_refuses_to_stage_fails_loudly(ready):
     ready.write("p.md", note_text(summary="swallowed"))
 
     result = ready.cli("add", "p.md", "--as", "private/p")
-    assert result.returncode == 0, result.stderr
-    failed = ready.cli("flush")
-    assert failed.returncode == 1
-    assert json.loads(failed.stderr)["error"]["code"] == "queued_write_failed"
+    assert result.returncode != 0
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] in {"internal_error", "schema_invalid"}, error
     # Rolled back rather than left on disk uncommitted.
     assert not (ready.repo / "projects" / "demo" / "private" / "p.md").exists()
 

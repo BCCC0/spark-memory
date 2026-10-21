@@ -23,72 +23,47 @@ normally invoked with `uv run mem`.
 
 ## What waits, blocks, or returns a hint
 
-| Command or path | Before returning | Blocks the operation? | Visible result |
+| Command or path | What happens before it returns | Blocking | Visible result |
 | --- | --- | --- | --- |
-| `mem add` | Check every local Markdown summary, upload bytes, and receive durable server acceptance | **Yes** for invalid format, rejected upload, full queue, or an ID already in an unfinished job | `queued` receipt on acceptance; never claims a Git commit already happened |
-| `mem rm` | Validate the request and receive durable server acceptance | **Yes** for an invalid request or busy affected ID | `queued` receipt |
-| `mem mv` | Queue the move behind already-accepted writes, then wait for that job's own commit | **Yes** for its own commit; it never waits for the project queue to empty | Final move result, or `target_busy` when another unfinished write owns the same IDs |
+| `mem add` | Validate, write, commit, and advance the text index | **Yes**, until the commit returns | `committed` result with the new `head` |
+| `mem rm` | Validate and version the deletion | **Yes**, until the commit returns | `committed` result (`changed`, `removed`) |
+| `mem mv` | Plan and commit under the write lock, journaling first | **Yes**, until its own commit returns | Final move result |
 | Git pre-commit hook | Check selected staged Markdown locally | **Yes** when selected Markdown has an invalid summary | Format error identifying the staged file |
-| Git post-commit / post-merge hook | Upload selected committed state and receive durable server acceptance | **No**: a sync failure is logged and does not undo the source Git operation | Accepted receipt or logged warning; a busy file requires a later manual `mem hook update` |
-| `mem read ID` | Check the committed Git snapshot and unfinished/failed writes affecting the ID | **No** waiting for the queue | Committed record, `pending` hint, or failed-write error with the last committed revision |
-| `mem read ID@REV` | Read the requested committed revision | **No** waiting for the queue | Historical record, regardless of current queued work |
-| `mem search` | Search the latest completed index | **No** waiting for writes or indexing | Hits plus a pending-write hint and index-lag indicator |
-| `mem flush` | Wait for every job accepted before the command starts; the text index is not part of the barrier | **Yes**, intentionally waits | `flushed` with a Git head, a typed error listing failed jobs, or `lock_timeout` (exit 3) when a job cannot commit |
+| Git post-commit / post-merge hook | Upload each batch and wait for its commit | **Yes**, for the upload and commit; a failure is logged and never undoes the source commit | `added`, `receipts`, and `errors` |
+| `mem read ID` | Read the committed snapshot from the catalog | No | Committed record |
+| `mem read ID@REV` | Read the requested committed revision | No | Historical record |
+| `mem search` | Search the latest text index; vectors may lag | No | Hits plus `index_lag` |
+| `mem flush` | Compatibility command; writes are already committed | Trivially | `flushed` with the current head |
 
-“Blocks” in this table means *refuses the requested action*. Uploading a large
-request and durably recording it still take time. No CLI read or search command
-waits for the write queue to empty. `mem flush` is the explicit barrier; it
-captures a finite set of already accepted jobs, so later writes do not extend
-its wait. There is no `--wait` option on read or search and no separate job-status
-command.
+Writes are synchronous. A single in-process lock serialises them; a concurrent
+writer waits up to `MEM_LOCK_TIMEOUT` (15 s) and then receives `lock_timeout`
+(exit 3). There is no spool, no job database, no receipt to poll, and no `202`.
+`mem flush` remains for scripts and returns immediately, because there is
+nothing queued.
 
-Failed receipts remain visible to `mem flush` after the queue drains. Its error
-lists those receipts. A later successful write for every affected ID resolves
-the earlier failure for future flushes. `mem flush` waits for the queue only;
-if a job cannot commit within 3 minutes it fails with `lock_timeout` and exit 3.
-
-The text index advances in the write path (one incremental update, before the
-job settles), so a committed write is searchable when the flush returns. If that
-update or a full rebuild is deferred, `mem status` reports the index lag; it does
-not turn a drained queue into a flush failure.
-
-Embeddings are not on this barrier. They run in a background pass and report
-their own lag (`index_lag`, `status.hybrid.indexed_head`); a write is durably
+Embeddings are not on this path at all. They run in a background pass and report
+their lag (`index_lag`, `status.hybrid.indexed_head`); a write is durably
 committed and text-searchable before any vector is computed, and no command
 waits for one.
 
 ## Hints, warnings, and errors
 
-- **`queued`** means the server has durably accepted a write. It is not a
-  committed or indexed result. The response includes a receipt and affected IDs,
-  but no new Git head.
-- **`pending`** on an ordinary read means that ID has an unfinished write. It
-  includes the receipt and last committed revision; old content must not be
-  presented as the new write. Multi-read gives each target its own state.
-- **`failed`** on a read means an accepted write could not be committed. It
-  includes the typed error and last committed revision. A caller can retry a
-  new write after the failed job releases its ID reservation.
-- **Search queue hint** reports how many accepted writes for the selected
-  project remain unfinished. Search results may omit those writes. Index lag is
-  reported separately because a completed Git commit may still be absent from
-  the latest index.
-- **Hook warning** is logged after a source Git commit when upload or queue
-  acceptance fails. It does not turn the completed Git commit into a failure.
-  A busy selected file leaves the hook watermark behind and requires a manual
-  `mem hook update` after the file clears.
-- **Hook update output** includes `receipts` and `status: "queued"` when writes
-  were accepted. Its `added` list names paths submitted to the queue; it does
-  not mean those paths have committed yet.
-- **Format and busy errors** are blocking for direct write commands. `mem add`
-  prechecks authored YAML summaries locally; the server validates again before
-  accepting. A second operation touching an unfinished ID is rejected rather
-  than queued behind it.
+- **`committed`** means the write is in the head commit when the command
+  returns. `changed: false` is a successful byte-identical no-op, not a failure.
+- **`lock_timeout`** means another writer held the write lock for longer than
+  `MEM_LOCK_TIMEOUT` (15 s). The action was refused; nothing was written.
+- **Search index lag** is reported separately (`index_lag`); a committed write is
+  text-searchable immediately, while vectors may follow in the background.
+- **Hook warnings** are logged when a batch upload or commit fails. They never
+  turn the source Git commit into a failure. A failed batch leaves the hook
+  watermark behind; a later `mem hook update` retries it.
+- **Hook update output** includes `receipts` and the per-batch result. Its
+  `added` list names paths that were committed.
+- **Format errors** are blocking: `mem add` prechecks authored YAML summaries
+  locally and the server validates again before writing.
 
-To observe read-after-write completion, use `mem flush` or poll `mem read ID`
-until its `pending` hint disappears. A successful read then returns the
-committed revision. To
-observe search freshness, inspect both the queue hint and index-lag indicator;
-an empty result alone is not proof that a queued addition is absent.
+Read-after-write is immediate: no polling and no `mem flush` is needed. `flush`
+remains as a compatibility command and returns the current head.
 
 ## Reading a note: whole, slice, link-only
 

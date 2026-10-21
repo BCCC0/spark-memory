@@ -108,7 +108,7 @@ def test_failed_move_rolls_back_all_paths(ready, monkeypatch):
     monkeypatch.setattr(MemoryRepo, "commit_paths", fail_move)
     accepted = ready.cli("mv", "--id", "a", "c")
     assert accepted.returncode == 1
-    assert "queued_write_failed" in accepted.stderr
+    assert "internal_error" in accepted.stderr
     assert ready.cli_json("status")["head"] == head
     assert (ready.repo / "projects/demo/a.md").read_bytes() == original
     assert not (ready.repo / "projects/demo/c.md").exists()

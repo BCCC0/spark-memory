@@ -39,12 +39,13 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import quote, unquote
 
 from starlette.applications import Starlette
@@ -64,7 +65,6 @@ from .auth import DeviceRegistry
 from .lock import WriteLock
 from .repo import MemoryRepo
 from .catalog import Catalog
-from .queue import WriteQueue
 from .search import SearchIndex
 from .idempotency import IdempotencyStore, add_key, rm_key
 from .moves import plan_move, commit_move, recover_move
@@ -942,6 +942,10 @@ class Reindexer:
         # committed bytes changed, so a one-note write no longer spawns one
         # `git show` per note in the corpus.
         self._source_cache: dict[str, tuple[str, Any]] = {}
+        # Paths committed since the last pass. It is an in-memory hint, not a
+        # durable queue: losing it only costs a sha re-scan, never content.
+        self._pending: set[str] = set()
+        self._pending_lock = threading.Lock()
         self._event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._failure_delay = 0.0
@@ -978,6 +982,12 @@ class Reindexer:
         """
         self._event.set()
         self.stats["requested"] += 1
+
+    def enqueue(self, paths: Iterable[str]) -> None:
+        """Record paths a commit touched and wake the worker."""
+        with self._pending_lock:
+            self._pending.update(paths)
+        self.request()
 
     def nudge(self) -> None:
         """Ask for a pass unless the last failure is still backing off.
@@ -1044,10 +1054,18 @@ class Reindexer:
                     row["path"]: row["sha256"] or ""
                     for row in self._catalog.rows()
                 }
-            stale = [
-                meta for meta in metas
-                if self._source_cache.get(meta.path, ("", None))[0] != hashes.get(meta.path, "")
-            ]
+            with self._pending_lock:
+                hinted = set(self._pending)
+                self._pending.clear()
+            if hinted:
+                # A write named the paths; trust it (a hinted path that did not
+                # actually change is just re-read and re-cached).
+                stale = [meta for meta in metas if meta.path in hinted]
+            else:
+                stale = [
+                    meta for meta in metas
+                    if self._source_cache.get(meta.path, ("", None))[0] != hashes.get(meta.path, "")
+                ]
             bodies = self._repo.read_notes([meta.path for meta in stale]) if stale else {}
             sources: dict[str, Any] = {}
             for meta in metas:
@@ -1111,8 +1129,6 @@ def create_app(settings: Settings) -> Starlette:
         settings.secret = _load_or_create_secret(settings.enroll_secret)
 
     reindexer = Reindexer(repo, index, vectors, catalog)
-    write_queue = WriteQueue(settings.state_dir, settings.repo_root)
-    queue_wake = asyncio.Event()
 
     # -- handlers ----------------------------------------------------------
 
@@ -1187,23 +1203,21 @@ def create_app(settings: Settings) -> Starlette:
         return JSONResponse(await asyncio.to_thread(_status))
 
     async def queue_progress(request: Request) -> JSONResponse:
-        raw = request.query_params.get("through")
-        try:
-            through = int(raw) if raw is not None else None
-        except ValueError as exc:
-            raise MemError("invalid_request", "through must be an integer") from exc
-        if through is not None and through < 0:
-            raise MemError("invalid_request", "through must be nonnegative")
-        progress = await asyncio.to_thread(write_queue.progress, through)
-        if progress["pending"] == 0:
-            progress["head"] = await asyncio.to_thread(repo.head)
-            progress["indexed_head"] = await asyncio.to_thread(index.indexed_head)
-            if progress["head"] != progress["indexed_head"]:
-                # An external commit has no write path to schedule indexing.
-                # `nudge` still respects a failed pass's backoff.
-                reindexer.nudge()
-        progress["reindex"] = dict(reindexer.stats)
-        return JSONResponse(progress)
+        """Compatibility stub: writes are synchronous, so nothing is ever queued."""
+
+        def _state() -> dict[str, Any]:
+            head = repo.head()
+            return {
+                "through": 0,
+                "pending": 0,
+                "failed": [],
+                "head": head,
+                "indexed_head": index.indexed_head(),
+                "vector_head": getattr(vectors, "head", lambda: None)() if vectors else None,
+                "reindex": dict(reindexer.stats),
+            }
+
+        return JSONResponse(await asyncio.to_thread(_state))
 
     async def projects(request: Request) -> JSONResponse:
         def _project_rows() -> list[dict[str, Any]]:
@@ -1292,16 +1306,6 @@ def create_app(settings: Settings) -> Starlette:
         caller_device_id = request.state.device["device_id"]
         caller_alias = request.state.device.get("alias")
         revision = params.get("revision")
-        if not revision:
-            queued = await asyncio.to_thread(write_queue.state, project, note_id)
-            if queued:
-                def _committed_revision() -> str | None:
-                    rel = repo.public_path(project, note_id, allow_missing=True)
-                    return repo.path_revision(rel)
-                queued["id"] = note_id
-                queued["project"] = project
-                queued["committed_revision"] = await asyncio.to_thread(snapshot, _committed_revision)
-                return JSONResponse(queued)
         # A slice, so a caller can consume the `line_range` a search hit reported
         # instead of fetching the whole note (S35).
         section = params.get("section")
@@ -1393,7 +1397,7 @@ def create_app(settings: Settings) -> Starlette:
                 "hits": text_hits,
                 "mode": "text",
                 "revision": text_head,
-                "queue_pending": await asyncio.to_thread(write_queue.pending_count, project),
+                "queue_pending": 0,
                 "index_lag": text_head != head,
             }
             if any(hit.get("relaxed") for hit in text_hits):
@@ -1438,7 +1442,7 @@ def create_app(settings: Settings) -> Starlette:
             if not hit.get("summary"):
                 hit["summary"] = _summary_of(repo, hit.get("project"), hit["id"])
         payload = {"hits": hits, "mode": "hybrid", "revision": head,
-                   "queue_pending": await asyncio.to_thread(write_queue.pending_count, project),
+                   "queue_pending": 0,
                    "index_lag": lagging}
         if relaxed:
             payload["relaxed"] = True
@@ -1497,14 +1501,6 @@ def create_app(settings: Settings) -> Starlette:
         validate_project(project)
         note_id = validate_id(params.get("id") or "")
         revision = params.get("revision")
-        if not revision:
-            queued = await asyncio.to_thread(write_queue.state, project, note_id)
-            if queued:
-                rel = await asyncio.to_thread(repo.public_path, project, note_id,
-                                              None, allow_missing=True)
-                queued.update({"id": note_id, "project": project,
-                               "committed_revision": await asyncio.to_thread(repo.path_revision, rel)})
-                return JSONResponse(queued)
         def _outline() -> tuple[dict[str, Any], int]:
             rel = repo.public_path(project, note_id, revision)
             try:
@@ -1730,13 +1726,19 @@ def create_app(settings: Settings) -> Starlette:
                     return _replay_result(cached)
 
             existed = target.is_file()
-            if not existed and if_match is not None:
+            # The queue used to run each job in a worktree checked out from HEAD,
+            # so a worktree deletion still left the blob tracked. Inline writes
+            # run in the served tree, so existence must be judged from HEAD too.
+            tracked = True if existed else work.is_tracked(rel)
+            if not tracked and if_match is not None:
                 raise MemError(
                     "stale_revision", f"{note_id} does not exist",
                     {"expected": if_match, "actual": None},
                 )
-            original = target.read_bytes() if existed else None
-            if existed and if_match is not None:
+            original = target.read_bytes() if existed else (
+                work.note_bytes(rel) if tracked else None
+            )
+            if tracked and if_match is not None:
                 current = work.sha256_bytes(original)
                 if if_match != current:
                     raise MemError(
@@ -1748,15 +1750,15 @@ def create_app(settings: Settings) -> Starlette:
                 work.remove_note(rel)
                 committed = work.commit_paths(message, [rel], device_id=device_id)
             except Exception:
-                work.rollback_path(rel, restore=original)
+                work.rollback_path(rel, restore=original if existed else None)
                 raise
 
             result = {
                 "id": note_id,
                 "project": project,
                 "path": rel,
-                "removed": existed,
-                "already_absent": not existed,
+                "removed": tracked,
+                "already_absent": not tracked,
                 "head": committed["head"],
                 "message": message if committed["changed"] else None,
                 "changed": committed["changed"],
@@ -1831,20 +1833,19 @@ def create_app(settings: Settings) -> Starlette:
         key = request.headers.get("idempotency-key")
         if_match = request.headers.get("if-match")
         await asyncio.to_thread(_preflight_add, project, note_id, rel, injected)
-        prior = await asyncio.to_thread(write_queue.lookup, project, device["device_id"], key)
+        prior = _idem_lookup(project, device["device_id"], key)
         if prior:
-            return JSONResponse(prior, status_code=202)
+            return JSONResponse(prior, status_code=200)
         if if_match:
             await asyncio.to_thread(_preflight_add, project, note_id, rel, injected, if_match)
         manifest = {"file_count": 1, "device_id": device["device_id"],
                     "project": project, "id": note_id, "rel": rel,
                     "message": message, "if_match": if_match, "kind": kind}
         result = await asyncio.to_thread(
-            write_queue.submit, project=project, kind="add", targets=[note_id],
+            _run_inline, project=project, kind="add", targets=[note_id],
             manifest=manifest, files=[injected], idem=key,
         )
-        queue_wake.set()
-        return JSONResponse(result, status_code=202)
+        return JSONResponse(result, status_code=200)
 
     async def _add_many_inner(request: Request, temp_root: Path) -> JSONResponse:
         """Validate a set of uploads and commit all changed paths together."""
@@ -1924,12 +1925,11 @@ def create_app(settings: Settings) -> Starlette:
                     "items": [{k: v for k, v in item.items() if k != "content"}
                               for item in prepared]}
         result = await asyncio.to_thread(
-            write_queue.submit, project=project, kind="add-many",
+            _run_inline, project=project, kind="add-many",
             targets=[item["id"] for item in prepared], manifest=manifest,
             files=[item["content"] for item in prepared], idem=key,
         )
-        queue_wake.set()
-        return JSONResponse(result, status_code=202)
+        return JSONResponse(result, status_code=200)
 
     async def add_many(request: Request) -> JSONResponse:
         with tempfile.TemporaryDirectory(prefix="upload-", dir=settings.state_dir) as root:
@@ -1953,11 +1953,9 @@ def create_app(settings: Settings) -> Starlette:
         dry_run = payload.get("dry_run") is True
         key = request.headers.get("idempotency-key")
         if_match = request.headers.get("if-match")
-        prior = await asyncio.to_thread(
-            write_queue.lookup, project, device["device_id"], key
-        )
+        prior = _idem_lookup(project, device["device_id"], key)
         if prior:
-            return JSONResponse(prior, status_code=202)
+            return JSONResponse(prior, status_code=200)
         meta, _data, raw = await asyncio.to_thread(
             _find_origin_note, repo, project, device["device_id"], old_path
         )
@@ -1990,11 +1988,10 @@ def create_app(settings: Settings) -> Starlette:
             "if_match": if_match,
         }
         result = await asyncio.to_thread(
-            write_queue.submit, project=project, kind="repath", targets=[meta.id],
+            _run_inline, project=project, kind="repath", targets=[meta.id],
             manifest=manifest, files=[], idem=key,
         )
-        queue_wake.set()
-        return JSONResponse(result, status_code=202)
+        return JSONResponse(result, status_code=200)
 
     async def rm(request: Request) -> JSONResponse:
         """Remove **and version** one note, as a single atomic act (S23/S28).
@@ -2015,20 +2012,19 @@ def create_app(settings: Settings) -> Starlette:
 
         key = request.headers.get("idempotency-key")
         if_match = request.headers.get("if-match")
-        prior = await asyncio.to_thread(write_queue.lookup, project, device["device_id"], key)
+        prior = _idem_lookup(project, device["device_id"], key)
         if prior:
-            return JSONResponse(prior, status_code=202)
+            return JSONResponse(prior, status_code=200)
         if if_match:
             await asyncio.to_thread(_preflight_remove, project, note_id, if_match)
         manifest = {"file_count": 0, "device_id": device["device_id"],
                     "project": project, "id": note_id, "rel": rel,
                     "message": message, "if_match": if_match}
         result = await asyncio.to_thread(
-            write_queue.submit, project=project, kind="rm", targets=[note_id],
+            _run_inline, project=project, kind="rm", targets=[note_id],
             manifest=manifest, files=[], idem=key,
         )
-        queue_wake.set()
-        return JSONResponse(result, status_code=202)
+        return JSONResponse(result, status_code=200)
 
     async def mv(request: Request) -> JSONResponse:
         device = request.state.device
@@ -2049,9 +2045,9 @@ def create_app(settings: Settings) -> Starlette:
         expected_head = request.headers.get("if-match")
 
         if not dry_run:
-            prior = await asyncio.to_thread(write_queue.lookup, project, device["device_id"], key)
+            prior = _idem_lookup(project, device["device_id"], key)
             if prior:
-                return JSONResponse(prior, status_code=202)
+                return JSONResponse(prior, status_code=200)
 
         # BUG(low): the write branch of this helper is unreachable.
         # Why valid: `_move()` is called only under `if dry_run:` further down, so the
@@ -2098,11 +2094,10 @@ def create_app(settings: Settings) -> Starlette:
                     "destination": destination, "folder": folder,
                     "message": message, "expected_head": expected_head}
         result = await asyncio.to_thread(
-            write_queue.submit, project=project, kind="mv", targets=targets,
+            _run_inline, project=project, kind="mv", targets=targets,
             manifest=manifest, files=[], idem=key,
         )
-        queue_wake.set()
-        return JSONResponse(result, status_code=202)
+        return JSONResponse(result, status_code=200)
 
     routes = [
         Route("/health", health, methods=["GET"]),
@@ -2144,8 +2139,12 @@ def create_app(settings: Settings) -> Starlette:
                  for index, row in enumerate(manifest["items"])]
         with lock.hold(device_id):
             previous: dict[str, bytes | None] = {}
+            # One listing, not one `git` spawn per item (a 101-file hook batch
+            # used to spend seconds in `public_path`).
+            known = {(meta.project, meta.id): meta.path for meta in work.notes()}
             for item in items:
-                existing = work.public_path(project, item["id"], allow_missing=True)
+                existing = known.get((project, item["id"])) or work.public_path(
+                    project, item["id"], allow_missing=True)
                 old_path = work.root / existing
                 old = old_path.read_bytes() if old_path.is_file() else None
                 was_pointer = (old is not None and existing.endswith(".md")
@@ -2165,9 +2164,6 @@ def create_app(settings: Settings) -> Starlette:
                         work.remove_note(item["old_rel"])
                     work.write_note(item["rel"], item["content"])
                 committed = work.commit_paths(message, list(previous), device_id=device_id)
-                for item in items:
-                    if not work.is_tracked(item["rel"]):
-                        raise MemError("internal_error", f"{item['rel']} was not tracked by git")
             except Exception:
                 for rel, old in previous.items():
                     work.rollback_path(rel, restore=old)
@@ -2184,9 +2180,8 @@ def create_app(settings: Settings) -> Starlette:
                                  bool(item["old_rel"] and item["old_rel"] in committed["committed"])}
                                 for item in items]}
 
-    def _execute_queued(job: dict[str, Any], work: MemoryRepo) -> dict[str, Any]:
-        manifest, files = write_queue.payload(job["id"])
-        kind = job["kind"]
+    def _apply_write(kind: str, manifest: dict[str, Any],
+                     files: list[bytes], work: MemoryRepo) -> dict[str, Any]:
         if kind == "add":
             result = _add_commit(
                 device_id=manifest["device_id"], project=manifest["project"],
@@ -2218,94 +2213,19 @@ def create_app(settings: Settings) -> Starlette:
                 work=work,
             )
         if kind == "mv":
-            with lock.hold(manifest["device_id"]):
-                plan = plan_move(work, manifest["project"],
-                                 manifest["source"], manifest["destination"],
-                                 folder=manifest["folder"], catalog=catalog)
-                if manifest["expected_head"] and plan.head != manifest["expected_head"]:
-                    raise MemError("stale_revision", "repository head changed",
-                                   {"expected": manifest["expected_head"], "actual": plan.head})
-                return commit_move(work, settings.state_dir, plan,
-                                   message=manifest["message"],
-                                   device_id=manifest["device_id"])
-        raise MemError("internal_error", f"unknown queued operation {kind}")
-
-    queue_stopping = False
-
-    def _head_contains(revision: str) -> bool:
-        """True when *revision* is already an ancestor of the served HEAD."""
-        return bool(revision) and revision in repo.git(
-            "rev-list", "HEAD", check=False
-        ).splitlines()
-
-    def _publish_queued(job: dict[str, Any]) -> dict[str, Any]:
-        receipt = job["id"]
-        if job.get("prepared_head") and _head_contains(job["prepared_head"]):
-            return json.loads(job["prepared_result"])
-        base = repo.head()
-        ref = repo.git("symbolic-ref", "HEAD").strip()
-        # Keep the worktree path short: Git for Windows otherwise interprets
-        # <revision>:<path> as an overlong filename during blob reads.
-        stage_root = Path(tempfile.gettempdir()) / "sparkmem-staging"
-        stage_root.mkdir(parents=True, exist_ok=True)
-        stage = stage_root / ("s-" + uuid.uuid4().hex[:12])
-        # BUG(medium): each job builds a fresh MemoryRepo and pays a full worktree
-        # checkout plus a full reset of the served tree -- O(corpus) work per write.
-        # Why valid: a new instance starts with an empty `_paths_cache`, so the first
-        # `public_path` call re-runs a `git show` per tracked path (see `list_note_paths`
-        # in repo.py); `worktree add` materialises the whole tree, and the `reset --hard`
-        # below rewrites the whole checkout -- for every job, including no-op ones.
-        # `_paths_cache` retains a single revision, so every published commit invalidates
-        # it again.
-        # Fix hint: reuse one persistent staging worktree (reset it between jobs instead
-        # of remove/add), share a revision-keyed path cache, and consider batching
-        # consecutive jobs into one commit.
-        repo.git("worktree", "add", "--detach", str(stage), base)
-        work = MemoryRepo(stage, settings.inline_extensions)
-        try:
-            result = _execute_queued(job, work)
-            head = work.head()
-            write_queue.prepared(receipt, head, result)
-            if head != base:
-                try:
-                    repo.git("update-ref", ref, head, base)
-                except MemError:
-                    # `update-ref` may have completed before its process timed out.
-                    # Once the prepared commit is reachable, the write is shipped and
-                    # must be settled as success, not recorded as failed.
-                    if not _head_contains(head):
-                        raise
-            # The checkout is a mirror, not the read source. Refresh it after
-            # publication; a crash is repaired at startup. A refresh failure must
-            # never turn an already-published write into a failed job.
-            try:
-                repo.git("reset", "--hard", head, check=False)
-            except MemError:
-                logger.warning(
-                    "mirror refresh failed after publishing %s at %s; startup will repair it",
-                    receipt,
-                    head,
-                    exc_info=True,
-                )
-            return result
-        finally:
-            try:
-                repo.git("worktree", "remove", "--force", str(stage), check=False)
-            except MemError:
-                logger.warning(
-                    "could not remove staging worktree %s; leaving it for cleanup",
-                    stage,
-                    exc_info=True,
-                )
-            if stage.resolve().is_relative_to(stage_root.resolve()):
-                shutil.rmtree(stage, ignore_errors=True)
+            plan = plan_move(work, manifest["project"],
+                             manifest["source"], manifest["destination"],
+                             folder=manifest["folder"], catalog=catalog)
+            if manifest["expected_head"] and plan.head != manifest["expected_head"]:
+                raise MemError("stale_revision", "repository head changed",
+                               {"expected": manifest["expected_head"], "actual": plan.head})
+            return commit_move(work, settings.state_dir, plan,
+                               message=manifest["message"],
+                               device_id=manifest["device_id"])
+        raise MemError("internal_error", f"unknown operation {kind}")
 
     def _advance_text_index(head: str) -> None:
-        """Advance the text index in the write path, never the embedding pass.
-
-        Best-effort: the commit is already durable, so a derived-index failure
-        must not fail the job. A full rebuild belongs to the background worker.
-        """
+        """Advance the text index in the write path; best-effort, never blocking."""
         try:
             with repo.pinned():
                 indexed = index.indexed_head()
@@ -2314,85 +2234,99 @@ def create_app(settings: Settings) -> Starlette:
                 if indexed is None or not repo.is_ancestor(indexed, head):
                     return
                 index.update(repo, head, repo.changed_paths(indexed, head))
-        except Exception:  # noqa: BLE001 - never fail a committed write
+        except Exception:  # noqa: BLE001 - a derived index must not fail a commit
             logger.exception("text index advance failed; left to the reindexer")
 
-    async def _queue_loop() -> None:
-        """Process jobs until shutdown, surviving transient queue/storage failures.
+    def _idem_lookup(project: str, device_id: str, idem: str | None) -> dict[str, Any] | None:
+        if not idem:
+            return None
+        prior = store.get(f"{project}:{device_id}:{idem}")
+        if prior is None:
+            return None
+        return {**prior, "idempotent_replay": True}
 
-        The whole iteration is supervised. A failure in `next_job`, in publishing,
-        or in recording the terminal state must not end the only publisher: the
-        API would keep accepting writes into a queue nothing drains.
+    def _run_inline(*, project: str, kind: str, targets: list[str],
+                    manifest: dict[str, Any], files: list[bytes],
+                    idem: str | None) -> dict[str, Any]:
+        """Execute one write inline under the single write lock.
+
+        The commit is durable when this returns. Catalog and text index are
+        updated in the same critical section; only the vector worker is told
+        which paths changed, and it can never block the write.
         """
-        nonlocal queue_stopping
-        while not queue_stopping:
-            try:
-                job = await asyncio.to_thread(write_queue.next_job)
-                if job is None:
-                    queue_wake.clear()
-                    job = await asyncio.to_thread(write_queue.next_job)
-                    if job is None:
-                        await queue_wake.wait()
-                        continue
+        device_id = manifest.get("device_id", "")
+        # Large multipart uploads arrive as temp paths; the commit helpers take
+        # bytes. The request caps bound this materialisation.
+        files = [item.read_bytes() if isinstance(item, Path) else item for item in files]
+        scoped = f"{project}:{device_id}:{idem}" if idem else None
+        if scoped:
+            prior = store.get(scoped)
+            if prior is not None:
+                return {**prior, "idempotent_replay": True}
+        with lock.hold(device_id):
+            base = repo.head()
+            result = _apply_write(kind, manifest, files, repo)
+            head = result.get("head") or base
+            if head != base:
+                _advance_text_index(head)
                 try:
-                    result = await asyncio.to_thread(_publish_queued, job)
-                except MemError as exc:
-                    await asyncio.to_thread(
-                        write_queue.finish, job["id"], error=exc.to_dict()["error"]
-                    )
-                except Exception as exc:  # noqa: BLE001 - keep the queue worker alive
-                    failure = MemError("internal_error", f"queued write failed: {exc}")
-                    await asyncio.to_thread(
-                        write_queue.finish, job["id"], error=failure.to_dict()["error"]
-                    )
-                else:
-                    # Advance the *text* index before the job is marked
-                    # committed, so `indexed_head == head` as soon as the queue
-                    # drains. The call is best-effort: a derived index must
-                    # never leave a durable commit unsettled.
-                    head = result.get("head") if isinstance(result, dict) else None
-                    if head:
-                        try:
-                            await asyncio.to_thread(_advance_text_index, head)
-                        except Exception:  # noqa: BLE001 - the commit is durable
-                            logger.exception("text index advance failed; job still settles")
-                    await asyncio.to_thread(write_queue.finish, job["id"], result=result)
-                    reindexer.request()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - a dead publisher is worse than a retry
-                logger.exception("write-queue worker failed; retrying")
-                await asyncio.sleep(1)
+                    catalog.ensure(repo, head)
+                except Exception:  # noqa: BLE001 - derived state must not undo a commit
+                    logger.exception("catalog update failed after a committed write")
+                try:
+                    reindexer.enqueue(repo.changed_paths(base, head))
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not enqueue changed paths for reindex")
+        out = {
+            "status": "committed",
+            "receipt": "w_" + uuid.uuid4().hex,
+            "seq": 0,
+            "affected_ids": sorted(set(targets)),
+            "head": head,
+            **{key: value for key, value in result.items() if key != "head"},
+            "idempotent_replay": False,
+        }
+        if scoped:
+            try:
+                store.put(scoped, out)
+            except OSError:
+                logger.warning("idempotency store write failed", exc_info=True)
+        return out
+
+    def _drain_legacy_queue() -> None:
+        """Run jobs left by a 0.1.x daemon, then never touch the queue again."""
+        from .queue import WriteQueue  # migration only
+
+        legacy = WriteQueue(settings.state_dir, settings.repo_root)
+        drained = 0
+        while True:
+            job = legacy.next_job()
+            if job is None:
+                break
+            try:
+                manifest, files = legacy.payload(job["id"])
+                with lock.hold("migration"):
+                    result = _apply_write(job["kind"], manifest, files, repo)
+                legacy.finish(job["id"], result=result)
+                drained += 1
+            except Exception as exc:  # noqa: BLE001 - report, keep draining
+                legacy.finish(job["id"], error={"code": "internal_error", "message": str(exc)})
+        if drained:
+            logger.warning("drained %d queued write(s) from the 0.1.x queue", drained)
 
     @asynccontextmanager
     async def lifespan(_app):
-        nonlocal queue_stopping
-        await asyncio.to_thread(write_queue.claim_worker)
-        # Git is authoritative; repair the checkout only after owning the queue.
-        try:
-            await asyncio.to_thread(repo.git, "reset", "--hard", "HEAD")
-            reindexer.start()
-        except Exception:
-            await asyncio.to_thread(write_queue.release_worker)
-            raise
-        queue_stopping = False
-        queue_wake.set()
-        queue_task = asyncio.create_task(_queue_loop(), name="mem-write-queue")
-        # One pass at startup so a restart converges instead of serving a stale index
-        # until the next write happens to trigger one (S32).
+        # Git is authoritative; repair a tree left dirty by a crashed write.
+        await asyncio.to_thread(repo.git, "reset", "--hard", "HEAD")
+        await asyncio.to_thread(_drain_legacy_queue)
+        reindexer.start()
+        # One pass at startup so a restart converges instead of serving a stale
+        # index until the next write happens to trigger one (S32).
         reindexer.request()
         try:
             yield
         finally:
-            queue_stopping = True
-            queue_wake.set()
-            try:
-                await queue_task
-            finally:
-                try:
-                    await reindexer.stop()
-                finally:
-                    await asyncio.to_thread(write_queue.release_worker)
+            await reindexer.stop()
 
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
@@ -2404,7 +2338,6 @@ def create_app(settings: Settings) -> Starlette:
     app.state.catalog = catalog
     app.state.vectors = vectors
     app.state.reindexer = reindexer
-    app.state.write_queue = write_queue
     _install_error_handler(app)
     return app
 

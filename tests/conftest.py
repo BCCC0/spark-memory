@@ -248,8 +248,9 @@ class Harness:
         result = self.cli(*args, cwd=cwd)
         assert result.returncode == 0, f"{args} failed: {result.stderr}"
         payload = json.loads(result.stdout)
+        if isinstance(payload, dict) and payload.get("status") == "committed":
+            return payload
         if args and args[0] == "init" and isinstance(payload, dict) and payload.get("receipt"):
-            self.wait_for_receipt(payload["receipt"])
             return payload
         # Most pre-queue tests inspect the committed result. Keep that fixture
         # contract while dedicated queue tests inspect the raw CLI receipt.
@@ -267,6 +268,9 @@ class Harness:
     def wait_for_receipt(self, receipt: str) -> dict:
         self.flush()
         db_path = self.state / "write-queue" / "jobs.db"
+        if not db_path.exists():
+            # Synchronous writes have no job row; the result was already returned.
+            return {}
         with sqlite3.connect(db_path) as db:
             row = db.execute("SELECT status, result, error FROM jobs WHERE id=?", (receipt,)).fetchone()
         assert row and row[0] == "committed", f"queued write {receipt} did not commit: {row}"
