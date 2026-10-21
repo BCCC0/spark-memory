@@ -66,6 +66,7 @@ class WriteQueue:
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
         self._guard = threading.RLock()
         self._worker_handle = None
+        self._finished = 0
         with self._connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -322,6 +323,11 @@ class WriteQueue:
                        ("failed" if error else "committed", json.dumps(result) if result else None,
                         json.dumps(error) if error else None, receipt))
             db.execute("DELETE FROM targets WHERE job_id=?", (receipt,))
+            self._finished += 1
+            if self._finished % 64 == 0:
+                # Amortised retention: a long-lived publisher keeps the table
+                # bounded too, not only a restart.
+                self._prune(db)
         shutil.rmtree(self.spool / receipt, ignore_errors=True)
 
     def state(self, project: str, note_id: str) -> dict[str, Any] | None:

@@ -8,7 +8,6 @@ import os
 import base64
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from ..errors import MemError, not_found
@@ -109,18 +108,18 @@ def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
         raise MemError("invalid_request", "a topic cannot move into itself")
 
     head = repo.head()
+    # Ids and paths come from git's own listing, so a note whose frontmatter
+    # does not parse is still part of the move (and fails it loudly, as before).
+    # The catalog only supplies the link shortcut.
+    metas = [meta for meta in repo.notes() if meta.project == project]
+    links: dict[str, set[str]] | None = None
     if catalog is not None:
-        # The queue worker plans against the head it is about to commit, so the
-        # projection must be current before its rows are trusted.
         catalog.ensure(repo, head)
-        rows = [row for row in catalog.rows() if row["project"] == project]
-        metas = [SimpleNamespace(id=row["note_id"], path=row["path"]) for row in rows]
-        links: dict[str, set[str]] | None = {
-            row["note_id"]: set(json.loads(row["links"] or "[]")) for row in rows
+        links = {
+            row["note_id"]: set(json.loads(row["links"] or "[]"))
+            for row in catalog.rows()
+            if row["project"] == project
         }
-    else:
-        metas = [meta for meta in repo.notes() if meta.project == project]
-        links = None
     selected = [meta for meta in metas if (meta.id.startswith(source + "/") if folder else meta.id == source)]
     if not selected:
         raise MemError("not_found", f"no {'topic' if folder else 'record'} at {source}")
@@ -145,6 +144,9 @@ def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
         needed: set[str] | None = moved_ids | {
             note_id for note_id, targets in links.items() if targets & moved_ids
         }
+        # A note the catalog skipped (unparseable frontmatter) is read anyway:
+        # if it references the move it must be rewritten or fail loudly.
+        needed |= {meta.id for meta in metas if meta.id not in links}
     else:
         needed = None
     to_read = [meta.path for meta in metas if needed is None or meta.id in needed]

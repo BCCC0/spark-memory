@@ -637,7 +637,7 @@ class VectorIndex:
         # Small batches bound how long the shared embed lock is held, so an
         # interactive query is not stuck behind a multi-second reindex batch.
         for start in range(0, len(pending), 8):
-            batch = pending[start : start + 32]
+            batch = pending[start : start + 8]
             vectors = embedder.embed([item[3] for item in batch])
             with self._connect() as conn:
                 for item, vector in zip(batch, vectors):

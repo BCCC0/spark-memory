@@ -743,155 +743,6 @@ def merge_hits(
     return out
 
 
-def _list_records_from_git(
-    repo: MemoryRepo,
-    *,
-    project: str | None = None,
-    prefix: str | None = None,
-    status: str | None = None,
-    note_type: str | None = None,
-    tag: str | None = None,
-    since: str | None = None,
-    sort: str = "updated",
-    limit: int = DEFAULT_LIMIT,
-    cursor: str | None = None,
-    full: bool = False,
-    alias_for_device: Any = None,
-    caller_device_id: str | None = None,
-) -> dict[str, Any]:
-    cutoff = None
-    seconds = _since_seconds(since)
-    if seconds is not None:
-        cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - seconds
-
-    metas = repo.notes()
-    known = {(meta.project, meta.id) for meta in metas}
-    bodies = repo.read_notes([meta.path for meta in metas])
-    records: list[dict[str, Any]] = []
-    topic_records: dict[str, dict[str, Any]] = {}
-    for meta in metas:
-        if project and meta.project != project:
-            continue
-        if prefix and not (
-            meta.id == prefix.rstrip("/") or meta.id.startswith(prefix.rstrip("/") + "/")
-        ):
-            continue
-        try:
-            raw = bodies.get(meta.path)
-            if raw is None:
-                continue
-            text = raw.decode("utf-8", "replace")
-            is_text_file = not meta.path.endswith(".md")
-            data, body = ({}, text) if is_text_file else fm.parse(text)
-            pointer = pointer_record(text) if not is_text_file else None
-        except Exception:  # noqa: BLE001 - a broken note must not break listing
-            continue
-        if status and data.get("status") != status:
-            continue
-        if note_type and data.get("type") != note_type:
-            continue
-        tags = data.get("tags") or []
-        if tag and tag not in tags:
-            continue
-        if cutoff is not None:
-            epoch = _iso_epoch(meta.updated)
-            if epoch is not None and epoch < cutoff:
-                continue
-        warnings = [] if pointer or is_text_file else fm.content_warnings(data, body)
-        if not pointer and not is_text_file:
-            warnings.extend(
-                f"link -> {target} does not exist"
-                for target in fm.note_links(body)
-                if (meta.project, target) not in known
-            )
-        if prefix:
-            base = prefix.strip("/")
-            remainder = meta.id[len(base) + 1 :] if meta.id.startswith(base + "/") else ""
-            if remainder and "/" in remainder:
-                child_topic = f"{base}/{remainder.split('/', 1)[0]}"
-                topic = topic_records.setdefault(child_topic, {
-                    "id": child_topic, "kind": "topic", "media_type": "inode/directory",
-                    "summary": "topic", "status": None, "type": None,
-                    "updated": meta.updated, "warnings": [],
-                })
-                if meta.updated and (not topic.get("updated") or meta.updated > topic["updated"]):
-                    topic["updated"] = meta.updated
-                continue
-        record = {
-            "id": meta.id,
-            "project": meta.project,
-            "kind": pointer.kind if pointer else ("text" if is_text_file else "note"),
-            "media_type": "text/plain" if pointer or is_text_file else "text/markdown",
-            "summary": pointer.summary if pointer else (data.get("summary", "") or fm.title_of(body) or (body.splitlines()[0][:200] if is_text_file and body.splitlines() else "")),
-            "status": data.get("status"),
-            "type": data.get("type"),
-            "updated": meta.updated,
-            "warnings": warnings,
-        }
-        if full:
-            origin_record: dict[str, Any] | None = None
-            if isinstance(data.get("origin"), dict):
-                origin = data["origin"]
-                origin_record = {"device": origin.get("device")}
-                origin_path = origin.get("path")
-                if (
-                    origin_path
-                    and caller_device_id
-                    and str(origin.get("device") or "") == caller_device_id
-                    and _looks_like_location(str(origin_path))
-                ):
-                    # The caller's own path is directly actionable and does not
-                    # depend on the device having an alias. Other devices only get
-                    # the alias-qualified pointer below.
-                    origin_record["path"] = str(origin_path)
-                elif (
-                    origin_path
-                    and alias_for_device
-                    and (Path(str(origin_path)).is_absolute()
-                         or PureWindowsPath(str(origin_path)).is_absolute())
-                ):
-                    author_alias = alias_for_device(str(origin.get("device") or ""))
-                    if author_alias:
-                        origin_record["pointer"] = f"@file({author_alias}:{origin_path})"
-            record.update(
-                {
-                    "project": meta.project,
-                    "tags": tags,
-                    "created": meta.created,
-                    "author": meta.author,
-                    "message": meta.message,
-                    "origin": origin_record,
-                    "sha256": repo.sha256_bytes(raw),
-                    "bytes": len(raw),
-                }
-            )
-        records.append(record)
-
-    records.extend(topic_records.values())
-
-    reverse = True
-    if sort == "id":
-        records.sort(key=lambda r: (r["project"] or "", r["id"]), reverse=False)
-    else:
-        records.sort(key=lambda r: (r.get("updated") or "", r["id"]), reverse=reverse)
-
-    start = 0
-    if cursor:
-        decoded = _decode_cursor(cursor)
-        if decoded:
-            target = decoded
-            for index, record in enumerate(records):
-                if ((record.get("updated") or ""), record["id"]) == target:
-                    start = index + 1
-                    break
-
-    window = records[start : start + max(1, limit)]
-    if not full:
-        for record in window:
-            record.pop("project", None)
-    next_cursor = _encode_cursor(records[start + len(window) - 1]) if len(records) > start + len(window) else None
-    return {"notes": window, "next_cursor": next_cursor, "total": len(records)}
-
 
 def list_records(
     repo: MemoryRepo,
@@ -1005,10 +856,16 @@ def list_records_catalog(
 
     window = records[start : start + max(1, limit)]
     if full:
-        wanted = [paths[(r["project"], r["id"])] for r in window if (r["project"], r["id"]) in paths]
+        wanted = [
+            paths[(r["project"], r["id"])]
+            for r in window
+            if r.get("project") and (r["project"], r["id"]) in paths
+        ]
         bodies = repo.read_notes(wanted)
         rows_by_key = {(r["project"], r["note_id"]): r for r in catalog.rows()}
         for record in window:
+            if not record.get("project"):
+                continue
             row = rows_by_key.get((record["project"], record["id"])) or {}
             path = paths.get((record["project"], record["id"]))
             raw = bodies.get(path) if path else None
@@ -1169,6 +1026,11 @@ class Reindexer:
         """
         with self._repo.pinned():
             head = self._repo.head()
+            if self._catalog is not None:
+                # The source cache is keyed by committed sha; without this the
+                # catalog still holds the previous sha and the cache would serve
+                # a stale body for a note that just changed.
+                self._catalog.ensure(self._repo, head)
             if self._index.indexed_head() != head:
                 # Safety net: the write path already advanced it, so this only
                 # fires for an external commit or a schema rebuild.
@@ -1319,6 +1181,7 @@ def create_app(settings: Settings) -> Starlette:
                 # visibility into whether the tree holds uncommitted content
                 # (S26). `true` here means something is wrong, not normal.
                 "index_dirty": dirty,
+                "git_calls": repo.git_calls,
                 "read": {"max_bytes": settings.max_bytes},
             }
         return JSONResponse(await asyncio.to_thread(_status))
@@ -2438,9 +2301,21 @@ def create_app(settings: Settings) -> Starlette:
                 shutil.rmtree(stage, ignore_errors=True)
 
     def _advance_text_index(head: str) -> None:
-        """Advance the text index in the write path, never the embedding pass."""
-        with repo.pinned():
-            index.ensure(repo, head)
+        """Advance the text index in the write path, never the embedding pass.
+
+        Best-effort: the commit is already durable, so a derived-index failure
+        must not fail the job. A full rebuild belongs to the background worker.
+        """
+        try:
+            with repo.pinned():
+                indexed = index.indexed_head()
+                if indexed == head:
+                    return
+                if indexed is None or not repo.is_ancestor(indexed, head):
+                    return
+                index.update(repo, head, repo.changed_paths(indexed, head))
+        except Exception:  # noqa: BLE001 - never fail a committed write
+            logger.exception("text index advance failed; left to the reindexer")
 
     async def _queue_loop() -> None:
         """Process jobs until shutdown, surviving transient queue/storage failures.
@@ -2471,13 +2346,16 @@ def create_app(settings: Settings) -> Starlette:
                         write_queue.finish, job["id"], error=failure.to_dict()["error"]
                     )
                 else:
-                    # Advance the *text* index here, before the job is marked
+                    # Advance the *text* index before the job is marked
                     # committed, so `indexed_head == head` as soon as the queue
-                    # drains. Vectors still run in the background; `flush` must
-                    # never wait for them.
+                    # drains. The call is best-effort: a derived index must
+                    # never leave a durable commit unsettled.
                     head = result.get("head") if isinstance(result, dict) else None
                     if head:
-                        await asyncio.to_thread(_advance_text_index, head)
+                        try:
+                            await asyncio.to_thread(_advance_text_index, head)
+                        except Exception:  # noqa: BLE001 - the commit is durable
+                            logger.exception("text index advance failed; job still settles")
                     await asyncio.to_thread(write_queue.finish, job["id"], result=result)
                     reindexer.request()
             except asyncio.CancelledError:
