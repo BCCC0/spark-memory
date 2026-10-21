@@ -741,7 +741,7 @@ def cmd_flush(args: argparse.Namespace) -> int:
     progress = client.queue_progress()
     through = progress["through"]
     deadline = time.monotonic() + FLUSH_TIMEOUT
-    while progress["pending"] or progress.get("indexed_head") != progress.get("head"):
+    while progress["pending"]:
         if time.monotonic() >= deadline:
             raise MemError(
                 "lock_timeout",
@@ -1363,30 +1363,6 @@ def _require_move_path(
         )
     return resolved
 
-
-def _wait_for_queue(client: Client) -> dict[str, Any]:
-    """Wait for queued work to drain; abort if any prior job failed."""
-    deadline = time.monotonic() + FLUSH_TIMEOUT
-    progress = client.queue_progress()
-    through = progress["through"]
-    while progress["pending"]:
-        if progress.get("failed"):
-            raise MemError(
-                "queued_write_failed",
-                f"{len(progress['failed'])} queued write(s) failed",
-                {"through": through, "failed": progress["failed"]},
-            )
-        if time.monotonic() >= deadline:
-            raise MemError("lock_timeout", "timed out waiting for queued writes", {"through": through})
-        time.sleep(0.1)
-        progress = client.queue_progress(through)
-    if progress.get("failed"):
-        raise MemError(
-            "queued_write_failed",
-            f"{len(progress['failed'])} queued write(s) failed",
-            {"through": through, "failed": progress["failed"]},
-        )
-    return progress
 
 
 def _wait_for_job(client: Client, receipt: str, seq: int) -> dict[str, Any]:

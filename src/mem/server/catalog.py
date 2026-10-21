@@ -115,7 +115,13 @@ class Catalog:
             )
             status = data.get("status")
             note_type = data.get("type")
-            tags = data.get("tags") or []
+            raw_tags = data.get("tags") or []
+            if isinstance(raw_tags, str):
+                raw_tags = [raw_tags]
+            if isinstance(raw_tags, (list, tuple)):
+                tags = [str(item) for item in raw_tags if isinstance(item, (str, int, float, bool))]
+            else:
+                tags = []
             links = set(fm.note_links(body)) if not is_text_file else set()
             for key in ("supersedes", "superseded_by"):
                 value = data.get(key)
@@ -176,8 +182,18 @@ class Catalog:
             if changed:
                 bodies = repo.read_notes(changed, head)
                 times = repo.commit_index()
-                rows = [self._row(path, bodies[path], times) for path in changed if bodies.get(path) is not None]
-                removed = [path for path in changed if bodies.get(path) is None]
+                rows: list[tuple[Any, ...]] = []
+                removed: list[str] = []
+                for path in changed:
+                    body = bodies.get(path)
+                    # A deleted path, a note that stopped being UTF-8, or one
+                    # whose frontmatter broke all mean "no row": the old row must
+                    # not survive a head stamp.
+                    row = None if body is None else self._row(path, body, times)
+                    if row is None:
+                        removed.append(path)
+                    else:
+                        rows.append(row)
                 with self._connect() as conn:
                     conn.executemany("DELETE FROM catalog WHERE path=?", [(p,) for p in removed])
                     self._write_rows(conn, rows)

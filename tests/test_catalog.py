@@ -89,6 +89,33 @@ def test_catalog_rebuild_equals_incremental(tmp_path):
     assert rows(incremental) == rows(rebuilt)
 
 
+def test_catalog_drops_a_row_that_stops_parsing(tmp_path):
+    repo = MemoryRepo(tmp_path / "repo")
+    repo.ensure()
+    path = _seed(repo, "alpha", "Alpha")
+    repo.commit_paths("add alpha", [path])
+    catalog = Catalog(tmp_path / "catalog.db")
+    catalog.ensure(repo, repo.head())
+    assert {row["note_id"] for row in catalog.rows()} == {"alpha"}
+
+    (repo.root / path).write_text("---\nsummary: [unclosed\n---\nbody\n", encoding="utf-8")
+    repo.commit_paths("break alpha", [path])
+    catalog.ensure(repo, repo.head())
+    assert {row["note_id"] for row in catalog.rows()} == set(), catalog.rows()
+
+
+def test_listing_a_prefix_with_full_does_not_crash(ready):
+    for name in ("one", "two"):
+        ready.write(f"{name}.md", note_text(summary=name.title()))
+        assert ready.cli("add", f"{name}.md", "--as", f"sub/a/{name}").returncode == 0
+    ready.flush()
+    listing = ready.cli_json("ls", "sub", "--full")
+    # A prefix listing returns the direct child topic, not the leaves; the
+    # regression was the `--full` path crashing on that topic record.
+    ids = {row["id"] for row in listing["notes"]}
+    assert "sub/a" in ids
+
+
 def test_listing_uses_catalog_fields(ready):
     ready.write("catalog.md", note_text(summary="Catalog row"))
     assert ready.cli("add", "catalog.md").returncode == 0

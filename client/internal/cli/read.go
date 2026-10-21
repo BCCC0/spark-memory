@@ -282,7 +282,7 @@ func flush(cl *transport.Client) (any, string, error) {
 	}
 	through := object(result)["through"]
 	deadline := time.Now().Add(flushTimeout)
-	for object(result)["pending"] != float64(0) || object(result)["indexed_head"] != object(result)["head"] {
+	for object(result)["pending"] != float64(0) {
 		if time.Now().After(deadline) {
 			return nil, "", memerr.New("lock_timeout", "flush timed out waiting for queued writes and indexing", map[string]any{"through": through})
 		}

@@ -94,13 +94,13 @@ class MemoryRepo:
     ) -> str:
         return self.git_bytes(*args, env=env, check=check, stdin=stdin).decode("utf-8", "replace")
 
-    def git_bytes(
+    def _run(
         self,
         *args: str,
         env: dict[str, str] | None = None,
         check: bool = True,
         stdin: bytes | None = None,
-    ) -> bytes:
+    ) -> subprocess.CompletedProcess[bytes]:
         command = ["git", "-C", str(self.root), *args]
         full_env = os.environ.copy()
         # A headless box must never hang on a hook or a gpg agent
@@ -125,7 +125,16 @@ class MemoryRepo:
         if check and completed.returncode != 0:
             stderr = completed.stderr.decode("utf-8", "replace").strip()
             raise MemError("internal_error", f"git {args[0]} failed: {stderr}")
-        return completed.stdout
+        return completed
+
+    def git_bytes(
+        self,
+        *args: str,
+        env: dict[str, str] | None = None,
+        check: bool = True,
+        stdin: bytes | None = None,
+    ) -> bytes:
+        return self._run(*args, env=env, check=check, stdin=stdin).stdout
 
     def cat_file_batch(self, specs: list[str]) -> dict[str, bytes | None]:
         """Read many objects with **one** `git cat-file --batch` process.
@@ -152,7 +161,9 @@ class MemoryRepo:
             if len(parts) == 3 and parts[1] in {"blob", "tree", "commit", "tag"} and parts[2].isdigit():
                 size = int(parts[2])
                 start = newline + 1
-                result[spec] = raw[start : start + size]
+                # Only a blob is a note body; a tree or commit at the same name
+                # must look absent to `note_bytes`, as it did before.
+                result[spec] = raw[start : start + size] if parts[1] == "blob" else None
                 position = start + size + 1
             else:
                 # "<spec> missing", "<spec> ambiguous", ...
@@ -513,31 +524,11 @@ class MemoryRepo:
         if not relpaths:
             raise MemError("invalid_request", "a commit needs at least one path")
 
-        # `-A` stages additions, modifications AND deletions (the probe in the
-        # test suite confirms it handles a deleted-but-tracked path). Tolerant
-        # because a caller may already have staged the change, in which case a
-        # second `add -A` on that pathspec matches nothing and git errors — the
-        # `diff --cached` gate below is the real check.
+        # `-A` stages additions, modifications and deletions for exactly these
+        # paths (S26). A path-limited `git commit` alone does not stage a new
+        # file, so this one call stays; the saves come from dropping the
+        # `diff --cached` probe and the follow-up `show --name-only`.
         self.git("add", "-A", "--", *relpaths, check=False)
-        changed = [
-            line.strip()
-            for line in self.git(
-                "diff", "--cached", "--name-only", "--", *relpaths, check=False
-            ).splitlines()
-            if line.strip()
-        ]
-        if not changed:
-            # Nothing staged means the write was a no-op: the tree already holds
-            # byte-identical content. That is **success**, not a failure (S30) --
-            # re-adding identical content is not an error, and exit 5 is reserved.
-            # The caller reports `changed: false` rather than pretending a commit
-            # happened.
-            return {
-                "head": self.head(),
-                "committed": [],
-                "message": message,
-                "changed": False,
-            }
 
         env: dict[str, str] = {}
         if device_id:
@@ -547,7 +538,7 @@ class MemoryRepo:
                 "GIT_COMMITTER_NAME": device_id,
                 "GIT_COMMITTER_EMAIL": f"{device_id}@mem.local",
             }
-        self.git(
+        completed = self._run(
             "commit",
             "-q",
             "--no-verify",
@@ -557,11 +548,40 @@ class MemoryRepo:
             "--",
             *relpaths,
             env=env,
+            check=False,
         )
+        if completed.returncode != 0:
+            output = (completed.stdout + completed.stderr).decode("utf-8", "replace").strip()
+            if any(
+                marker in output
+                for marker in ("nothing to commit", "nothing added to commit", "no changes added")
+            ):
+                # Byte-identical re-write: success, not a failure (S30).
+                return {
+                    "head": self.head(),
+                    "committed": [],
+                    "message": message,
+                    "changed": False,
+                }
+            if "did not match any file(s) known to git" in output:
+                # A remove of a path that never existed: nothing to commit is
+                # success (S25). A path that exists on disk but is untracked is
+                # the ignore-rule failure S30 wants loud.
+                if all(
+                    not (self.root / relpath).exists() and not self.is_tracked(relpath)
+                    for relpath in relpaths
+                ):
+                    return {
+                        "head": self.head(),
+                        "committed": [],
+                        "message": message,
+                        "changed": False,
+                    }
+            raise MemError("internal_error", f"git commit failed: {output}")
         committed = sorted(
             line.strip()
             for line in self.git(
-                "show", "--name-only", "--format=", "HEAD", check=False
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", check=False
             ).splitlines()
             if line.strip()
         )

@@ -142,31 +142,6 @@ func intField(value any, key string) int {
 	return 0
 }
 
-func waitQueue(cl *transport.Client) error {
-	progress, err := req(cl, "GET", "/v1/queue", nil, nil, nil)
-	if err != nil {
-		return err
-	}
-	through := intField(progress, "through")
-	deadline := time.Now().Add(flushTimeout)
-	for object(progress)["pending"] != float64(0) {
-		if failed := lenSlice(object(progress)["failed"]); failed > 0 {
-			return memerr.New("queued_write_failed", fmt.Sprintf("%d queued write(s) failed", failed), map[string]any{"through": through})
-		}
-		if time.Now().After(deadline) {
-			return memerr.New("lock_timeout", "timed out waiting for queued writes", map[string]any{"through": through})
-		}
-		time.Sleep(100 * time.Millisecond)
-		progress, err = req(cl, "GET", "/v1/queue", map[string]string{"through": fmt.Sprint(through)}, nil, nil)
-		if err != nil {
-			return err
-		}
-	}
-	if failed := lenSlice(object(progress)["failed"]); failed > 0 {
-		return memerr.New("queued_write_failed", fmt.Sprintf("%d queued write(s) failed", failed), map[string]any{"through": through})
-	}
-	return nil
-}
 
 func waitJob(cl *transport.Client, receipt string, seq int) error {
 	deadline := time.Now().Add(flushTimeout)

@@ -33,7 +33,7 @@ normally invoked with `uv run mem`.
 | `mem read ID` | Check the committed Git snapshot and unfinished/failed writes affecting the ID | **No** waiting for the queue | Committed record, `pending` hint, or failed-write error with the last committed revision |
 | `mem read ID@REV` | Read the requested committed revision | **No** waiting for the queue | Historical record, regardless of current queued work |
 | `mem search` | Search the latest completed index | **No** waiting for writes or indexing | Hits plus a pending-write hint and index-lag indicator |
-| `mem flush` | Wait for every job accepted before the command starts; the text index advances in the write path, so it is already at the committed head | **Yes**, intentionally waits | `flushed` with a Git head, a typed error listing failed jobs, or `lock_timeout` (exit 3) when a job cannot commit |
+| `mem flush` | Wait for every job accepted before the command starts; the text index is not part of the barrier | **Yes**, intentionally waits | `flushed` with a Git head, a typed error listing failed jobs, or `lock_timeout` (exit 3) when a job cannot commit |
 
 “Blocks” in this table means *refuses the requested action*. Uploading a large
 request and durably recording it still take time. No CLI read or search command
@@ -44,10 +44,13 @@ command.
 
 Failed receipts remain visible to `mem flush` after the queue drains. Its error
 lists those receipts. A later successful write for every affected ID resolves
-the earlier failure for future flushes. If the queue drains but the text index
-cannot catch up within 3 minutes, `mem flush` fails with `lock_timeout` and exit
-3 rather than waiting forever; the response and `mem index` show the reindexer's
-last error.
+the earlier failure for future flushes. `mem flush` waits for the queue only;
+if a job cannot commit within 3 minutes it fails with `lock_timeout` and exit 3.
+
+The text index advances in the write path (one incremental update, before the
+job settles), so a committed write is searchable when the flush returns. If that
+update or a full rebuild is deferred, `mem status` reports the index lag; it does
+not turn a drained queue into a flush failure.
 
 Embeddings are not on this barrier. They run in a background pass and report
 their own lag (`index_lag`, `status.hybrid.indexed_head`); a write is durably
