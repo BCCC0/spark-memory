@@ -55,9 +55,6 @@ func moveIDs(o options, c config.Config, cl *transport.Client) (any, string, err
 		}, headers("", o.flag("expect-head")))
 		return result, fmt.Sprintf("would move %s to %s", src, dst), err
 	}
-	if err := waitQueue(cl); err != nil {
-		return nil, "", err
-	}
 	key := keys.Move(src, dst, o.flag("expect-head"), o.flag("message"))
 	result, err := req(cl, "POST", "/v1/mv", nil, map[string]any{
 		"project": c.Project, "source": src, "destination": dst,
@@ -102,9 +99,6 @@ func movePaths(o options, c config.Config, cl *transport.Client) (any, string, e
 	if o.has("dry-run") {
 		result, err := repathRequest(cl, c, source, destination, o.flag("expect"), o.flag("message"), true, "")
 		return result, fmt.Sprintf("would move %s to %s", source, destination), err
-	}
-	if err := waitQueue(cl); err != nil {
-		return nil, "", err
 	}
 	lookup, err := repathRequest(cl, c, source, destination, o.flag("expect"), o.flag("message"), true, "")
 	if err != nil {

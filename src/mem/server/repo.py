@@ -22,6 +22,17 @@ from ..ids import note_relpath, split_public_path, text_relpath
 IGNORED_DIRS = {".mem", ".git"}
 
 
+def _is_utf8_text(body: bytes | None) -> bool:
+    """True when *body* is a UTF-8 record without NUL bytes."""
+    if body is None or b"\0" in body:
+        return False
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def _epoch(value: str) -> float:
     """Parse a git ISO timestamp for ordering; unparseable sorts oldest."""
     try:
@@ -46,6 +57,13 @@ class MemoryRepo:
         self.root = Path(root)
         self.inline_extensions = frozenset(inline_extensions)
         self._paths_cache: dict[str, list[str]] = {}
+        # `commit_index` is the expensive half of `notes()`: one `git log
+        # --name-only` over the whole history. It only depends on the revision,
+        # so memoise it per head instead of re-running it on every call.
+        self._commit_index_cache: dict[str, dict[str, tuple[str, str, str, str]]] = {}
+        # Spawn accounting for tests and `/v1/status`: every git invocation in
+        # this process goes through `git_bytes`, so this is the true count.
+        self.git_calls = 0
         # A move changes several worktree paths before one Git commit. Current
         # readers take this gate around their complete projection.
         self.snapshot_lock = threading.Lock()
@@ -89,6 +107,7 @@ class MemoryRepo:
         full_env.setdefault("GIT_TERMINAL_PROMPT", "0")
         if env:
             full_env.update(env)
+        self.git_calls += 1
         try:
             completed = subprocess.run(
                 command,
@@ -106,6 +125,53 @@ class MemoryRepo:
             stderr = completed.stderr.decode("utf-8", "replace").strip()
             raise MemError("internal_error", f"git {args[0]} failed: {stderr}")
         return completed.stdout
+
+    def cat_file_batch(self, specs: list[str]) -> dict[str, bytes | None]:
+        """Read many objects with **one** `git cat-file --batch` process.
+
+        ``specs`` are object names such as ``<rev>:<path>``. Missing objects are
+        returned as ``None`` instead of raising, because listing and indexing
+        both need to skip a record that vanished between the path listing and
+        the read. Parsing is byte-accurate: the batch protocol encodes object
+        bodies as ``<sha> <type> <size>\\n<bytes>``, and a body may contain
+        newlines.
+        """
+        if not specs:
+            return {}
+        payload = ("\n".join(specs) + "\n").encode("utf-8")
+        raw = self.git_bytes("cat-file", "--batch", stdin=payload, check=False)
+        result: dict[str, bytes | None] = {}
+        position = 0
+        for spec in specs:
+            newline = raw.find(b"\n", position)
+            if newline < 0:
+                raise MemError("internal_error", "truncated output from git cat-file")
+            header = raw[position:newline].decode("utf-8", "replace")
+            parts = header.rsplit(" ", 2)
+            if len(parts) == 3 and parts[1] in {"blob", "tree", "commit", "tag"} and parts[2].isdigit():
+                size = int(parts[2])
+                start = newline + 1
+                result[spec] = raw[start : start + size]
+                position = start + size + 1
+            else:
+                # "<spec> missing", "<spec> ambiguous", ...
+                result[spec] = None
+                position = newline + 1
+        return result
+
+    def read_notes(
+        self, relpaths: list[str], revision: str | None = None
+    ) -> dict[str, bytes | None]:
+        """Blob bytes for many paths, batched; ``None`` for a missing path."""
+        if not relpaths:
+            return {}
+        chosen = revision or self._revision()
+        specs = [f"{chosen}:{relpath}" for relpath in relpaths]
+        blobs = self.cat_file_batch(specs)
+        return {
+            relpath: blobs[spec]
+            for relpath, spec in zip(relpaths, specs)
+        }
 
     def _identity_present(self) -> bool:
         """True when the commit identity is already set, so `ensure()` can skip it.
@@ -190,38 +256,30 @@ class MemoryRepo:
 
     # -- reading -----------------------------------------------------------
 
-    # BUG(medium): this runs one `git show` PER TRACKED PATH, on the read and publish
-    # paths.
-    # Why valid: `_is_utf8_record` below shells out once per candidate, so the cost is
-    # O(corpus) process spawns -- dominant on Windows, and paid again by every fresh
-    # `MemoryRepo` because `_paths_cache` starts empty and is then overwritten rather
-    # than grown. It is reached from `public_path`, and therefore from the `rm` handler
-    # on the event loop, and from `_add_commit` via `public_path` for every queued job.
-    # Fix hint: classify UTF-8/NUL for the whole candidate list in one
-    # `git cat-file --batch` pass, and keep the cache revision-keyed with a small LRU
-    # instead of a single entry that every new commit invalidates.
+    # One `git cat-file --batch` classifies every candidate, so the cost is a
+    # single spawn per revision instead of one per path (the old BUG here).
     def list_note_paths(self) -> list[str]:
         revision = self._revision()
         cached = self._paths_cache.get(revision)
         if cached is not None:
             return list(cached)
         tracked = self.git_bytes("ls-tree", "-r", "-z", "--name-only", revision, "--", "projects/", check=False).decode("utf-8", "replace")
-        paths = sorted(
+        candidates = [
             rel for rel in tracked.split("\0")
             if rel and not any(part in IGNORED_DIRS for part in rel.split("/"))
             and Path(rel).suffix.lower() in self.inline_extensions
-            and self._is_utf8_record(rel, revision)
+        ]
+        bodies = self.read_notes(candidates, revision) if candidates else {}
+        paths = sorted(
+            rel for rel in candidates
+            if _is_utf8_text(bodies.get(rel))
         )
         self._paths_cache = {revision: paths}
         return list(paths)
 
     def _is_utf8_record(self, relpath: str, revision: str | None = None) -> bool:
-        try:
-            body = self.git_bytes("show", f"{revision or self._revision()}:{relpath}")
-            body.decode("utf-8")
-            return b"\0" not in body
-        except (OSError, UnicodeDecodeError, MemError):
-            return False
+        body = self.read_notes([relpath], revision).get(relpath)
+        return _is_utf8_text(body)
 
     def is_ancestor(self, older: str, newer: str) -> bool:
         """True when *older* is reachable from *newer* (including equality)."""
@@ -299,10 +357,10 @@ class MemoryRepo:
 
     def note_bytes(self, relpath: str, revision: str | None = None) -> bytes:
         chosen = revision or self._revision()
-        tree = self.git("ls-tree", "-r", "--name-only", chosen, "--", relpath, check=False)
-        if relpath not in tree.splitlines():
+        body = self.read_notes([relpath], chosen).get(relpath)
+        if body is None:
             raise not_found(f"{relpath} does not exist at revision {chosen}")
-        return self.git_bytes("show", f"{chosen}:{relpath}")
+        return body
 
     @staticmethod
     def sha256_bytes(data: bytes) -> str:
@@ -343,6 +401,10 @@ class MemoryRepo:
         (``MEM-RESOLUTIONS.md`` S24): the description of the change, derived from
         git and never authored into frontmatter.
         """
+        revision = self._revision()
+        cached = self._commit_index_cache.get(revision)
+        if cached is not None:
+            return cached
         raw = self.git(
             "log",
             "--no-renames",
@@ -374,6 +436,7 @@ class MemoryRepo:
             newest = max(entries, key=lambda e: _epoch(e[0]))
             oldest = min(entries, key=lambda e: _epoch(e[0]))
             result[path] = (oldest[0], newest[0], newest[1], newest[2])
+        self._commit_index_cache = {revision: result}
         return result
 
     def notes(self) -> list[NoteMeta]:

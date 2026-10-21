@@ -1635,7 +1635,6 @@ def cmd_mv(args: argparse.Namespace) -> int:
             )
             emit(result, human=f"would move {source_arg} to {destination_arg}", as_human=args.human)
             return 0
-        _wait_for_queue(client)
         result = client.mv(
             config.project, source_arg, destination_arg,
             idempotency_key=mv_key(source_arg, destination_arg, args.expect_head,
@@ -1679,7 +1678,6 @@ def cmd_mv(args: argparse.Namespace) -> int:
         emit(result, human=f"would move {old_path} to {new_path}", as_human=args.human)
         return 0
 
-    _wait_for_queue(client)
     # Resolve before touching the filesystem, so a typo cannot move a file that
     # no note owns.
     lookup = client.repath(

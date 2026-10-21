@@ -188,7 +188,7 @@ class WriteQueue:
 
     def submit(self, *, project: str, kind: str, targets: list[str],
                manifest: dict[str, Any], files: list[bytes | Path],
-               idem: str | None, require_empty_project: bool = False) -> dict[str, Any]:
+               idem: str | None) -> dict[str, Any]:
         if not targets or len(targets) != len(set(targets)):
             raise MemError("invalid_request", "write needs distinct affected IDs")
         size = sum(body.stat().st_size if isinstance(body, Path) else len(body)
@@ -213,11 +213,6 @@ class WriteQueue:
                 ).fetchone()
                 if count >= MAX_JOBS or used + size > MAX_PENDING_BYTES:
                     raise MemError("queue_full", "server write queue is full")
-                if require_empty_project and db.execute(
-                    "SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running') LIMIT 1",
-                    (project,),
-                ).fetchone():
-                    raise MemError("target_busy", "a move requires pending project writes to finish")
                 busy = db.execute(
                     "SELECT id FROM targets WHERE project=? AND id IN (" + ",".join("?" for _ in targets) + ") LIMIT 1",
                     (project, *targets),

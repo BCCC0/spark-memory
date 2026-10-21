@@ -63,6 +63,7 @@ from . import frontmatter as fm
 from .auth import DeviceRegistry
 from .lock import WriteLock
 from .repo import MemoryRepo
+from .catalog import Catalog
 from .queue import WriteQueue
 from .search import SearchIndex
 from .idempotency import IdempotencyStore, add_key, rm_key
@@ -664,15 +665,18 @@ def known_ids(repo: MemoryRepo) -> set[tuple[str, str]]:
     return {(meta.project, meta.id) for meta in repo.notes()}
 
 
-def note_source(repo: MemoryRepo, relpath: str) -> embedding.NoteSource:
+def note_source(repo: MemoryRepo, relpath: str, raw: bytes | None = None) -> embedding.NoteSource:
     """Everything the semantic index needs from one note (S32).
 
     The title is embedded (Basic Memory embeds title + permalink, not the bare body),
     and `status`/`type`/`tags` are carried so the vector half can apply the same
     filters as the text half instead of silently ignoring them.
+
+    ``raw`` lets a caller that already batched the blob hand it in, instead of
+    paying one `git show` per note.
     """
     try:
-        text = repo.read_note(relpath)
+        text = raw.decode("utf-8", "replace") if raw is not None else repo.read_note(relpath)
         pointer = pointer_record(text) if relpath.endswith(".md") else None
         if pointer:
             return embedding.NoteSource(title=pointer.summary, body="")
@@ -739,7 +743,7 @@ def merge_hits(
     return out
 
 
-def list_records(
+def _list_records_from_git(
     repo: MemoryRepo,
     *,
     project: str | None = None,
@@ -760,10 +764,12 @@ def list_records(
     if seconds is not None:
         cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - seconds
 
-    known = known_ids(repo)
+    metas = repo.notes()
+    known = {(meta.project, meta.id) for meta in metas}
+    bodies = repo.read_notes([meta.path for meta in metas])
     records: list[dict[str, Any]] = []
     topic_records: dict[str, dict[str, Any]] = {}
-    for meta in repo.notes():
+    for meta in metas:
         if project and meta.project != project:
             continue
         if prefix and not (
@@ -771,7 +777,9 @@ def list_records(
         ):
             continue
         try:
-            raw = repo.note_bytes(meta.path)
+            raw = bodies.get(meta.path)
+            if raw is None:
+                continue
             text = raw.decode("utf-8", "replace")
             is_text_file = not meta.path.endswith(".md")
             data, body = ({}, text) if is_text_file else fm.parse(text)
@@ -881,6 +889,168 @@ def list_records(
     if not full:
         for record in window:
             record.pop("project", None)
+    next_cursor = _encode_cursor(records[start + len(window) - 1]) if len(records) > start + len(window) else None
+    return {"notes": window, "next_cursor": next_cursor, "total": len(records)}
+
+
+def list_records(
+    repo: MemoryRepo,
+    *,
+    catalog: Any,
+    **filters: Any,
+) -> dict[str, Any]:
+    """`ls`, served from the catalog and never parsing a body for a normal listing."""
+    catalog.ensure(repo, repo.head())
+    return list_records_catalog(catalog, repo, **filters)
+
+
+def list_records_catalog(
+    catalog: Any,
+    repo: MemoryRepo,
+    *,
+    project: str | None = None,
+    prefix: str | None = None,
+    status: str | None = None,
+    note_type: str | None = None,
+    tag: str | None = None,
+    since: str | None = None,
+    sort: str = "updated",
+    limit: int = DEFAULT_LIMIT,
+    cursor: str | None = None,
+    full: bool = False,
+    alias_for_device: Any = None,
+    caller_device_id: str | None = None,
+) -> dict[str, Any]:
+    """`ls` from the derived catalog: no note body is read for a normal listing.
+
+    Bodies are read only for `full`, and only for the returned window, because
+    `origin` is the one field the catalog does not carry.
+    """
+    cutoff = None
+    seconds = _since_seconds(since)
+    if seconds is not None:
+        cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - seconds
+
+    known = catalog.ids()
+    records: list[dict[str, Any]] = []
+    topic_records: dict[str, dict[str, Any]] = {}
+    paths: dict[tuple[str, str], str] = {}
+    for row in catalog.rows():
+        if project and row["project"] != project:
+            continue
+        if prefix and not (
+            row["note_id"] == prefix.rstrip("/")
+            or row["note_id"].startswith(prefix.rstrip("/") + "/")
+        ):
+            continue
+        tags = json.loads(row["tags"] or "[]")
+        if status and row["status"] != status:
+            continue
+        if note_type and row["note_type"] != note_type:
+            continue
+        if tag and tag not in tags:
+            continue
+        if cutoff is not None:
+            epoch = _iso_epoch(row["updated"])
+            if epoch is not None and epoch < cutoff:
+                continue
+        links = json.loads(row["links"] or "[]")
+        warnings = list(json.loads(row["warnings"] or "[]"))
+        warnings.extend(
+            f"link -> {target} does not exist"
+            for target in links
+            if (row["project"], target) not in known
+        )
+        if prefix:
+            base = prefix.strip("/")
+            remainder = row["note_id"][len(base) + 1 :] if row["note_id"].startswith(base + "/") else ""
+            if remainder and "/" in remainder:
+                child_topic = f"{base}/{remainder.split('/', 1)[0]}"
+                topic = topic_records.setdefault(child_topic, {
+                    "id": child_topic, "kind": "topic", "media_type": "inode/directory",
+                    "summary": "topic", "status": None, "type": None,
+                    "updated": row["updated"], "warnings": [],
+                })
+                if row["updated"] and (not topic.get("updated") or row["updated"] > topic["updated"]):
+                    topic["updated"] = row["updated"]
+                continue
+        record = {
+            "id": row["note_id"],
+            "project": row["project"],
+            "kind": row["kind"],
+            "media_type": row["media_type"],
+            "summary": row["summary"] or "",
+            "status": row["status"],
+            "type": row["note_type"],
+            "updated": row["updated"],
+            "warnings": warnings,
+        }
+        paths[(row["project"], row["note_id"])] = row["path"]
+        records.append(record)
+
+    records.extend(topic_records.values())
+    if sort == "id":
+        records.sort(key=lambda r: (r["project"] or "", r["id"]), reverse=False)
+    else:
+        records.sort(key=lambda r: (r.get("updated") or "", r["id"]), reverse=True)
+
+    start = 0
+    if cursor:
+        decoded = _decode_cursor(cursor)
+        if decoded:
+            for index, record in enumerate(records):
+                if ((record.get("updated") or ""), record["id"]) == decoded:
+                    start = index + 1
+                    break
+
+    window = records[start : start + max(1, limit)]
+    if full:
+        wanted = [paths[(r["project"], r["id"])] for r in window if (r["project"], r["id"]) in paths]
+        bodies = repo.read_notes(wanted)
+        rows_by_key = {(r["project"], r["note_id"]): r for r in catalog.rows()}
+        for record in window:
+            row = rows_by_key.get((record["project"], record["id"])) or {}
+            path = paths.get((record["project"], record["id"]))
+            raw = bodies.get(path) if path else None
+            origin_record = None
+            if raw is not None:
+                try:
+                    data, _body = fm.parse(raw.decode("utf-8", "replace"))
+                except Exception:  # noqa: BLE001 - a broken note must not break a listing
+                    data = {}
+                origin = data.get("origin") if isinstance(data, dict) else None
+                if isinstance(origin, dict):
+                    origin_record = {"device": origin.get("device")}
+                    origin_path = origin.get("path")
+                    if (
+                        origin_path
+                        and caller_device_id
+                        and str(origin.get("device") or "") == caller_device_id
+                        and _looks_like_location(str(origin_path))
+                    ):
+                        origin_record["path"] = str(origin_path)
+                    elif (
+                        origin_path
+                        and alias_for_device
+                        and (Path(str(origin_path)).is_absolute()
+                             or PureWindowsPath(str(origin_path)).is_absolute())
+                    ):
+                        author_alias = alias_for_device(str(origin.get("device") or ""))
+                        if author_alias:
+                            origin_record["pointer"] = f"@file({author_alias}:{origin_path})"
+            record.update({
+                "tags": json.loads(row.get("tags") or "[]"),
+                "created": row.get("created"),
+                "author": row.get("author"),
+                "message": row.get("message"),
+                "origin": origin_record,
+                "sha256": row.get("sha256"),
+                "bytes": row.get("size"),
+            })
+    else:
+        for record in window:
+            record.pop("project", None)
+
     next_cursor = _encode_cursor(records[start + len(window) - 1]) if len(records) > start + len(window) else None
     return {"notes": window, "next_cursor": next_cursor, "total": len(records)}
 
@@ -997,7 +1167,11 @@ class Reindexer:
             if self._vectors is None:
                 return
             metas = self._repo.notes()
-            sources = {meta.path: note_source(self._repo, meta.path) for meta in metas}
+            bodies = self._repo.read_notes([meta.path for meta in metas])
+            sources = {
+                meta.path: note_source(self._repo, meta.path, bodies.get(meta.path))
+                for meta in metas
+            }
         self._vectors.sync(
             metas, sources.__getitem__, head
         )
@@ -1032,6 +1206,7 @@ def create_app(settings: Settings) -> Starlette:
     _link_key(settings)
     lock = WriteLock(settings.lock_timeout)
     index = SearchIndex(settings.state_dir / "search.db")
+    catalog = Catalog(settings.state_dir / "catalog.db")
     # The semantic half is optional: without the `embed` extra, `search` is the
     # FTS5 service it has always been and `--mode hybrid` is refused (S16).
     vectors = (
@@ -1170,6 +1345,7 @@ def create_app(settings: Settings) -> Starlette:
             snapshot,
             list_records,
             repo,
+            catalog=catalog,
             project=project,
             prefix=params.get("prefix"),
             status=params.get("status"),
@@ -1922,7 +2098,7 @@ def create_app(settings: Settings) -> Starlette:
         }
         result = await asyncio.to_thread(
             write_queue.submit, project=project, kind="repath", targets=[meta.id],
-            manifest=manifest, files=[], idem=key, require_empty_project=True,
+            manifest=manifest, files=[], idem=key,
         )
         queue_wake.set()
         return JSONResponse(result, status_code=202)
@@ -2030,7 +2206,7 @@ def create_app(settings: Settings) -> Starlette:
                     "message": message, "expected_head": expected_head}
         result = await asyncio.to_thread(
             write_queue.submit, project=project, kind="mv", targets=targets,
-            manifest=manifest, files=[], idem=key, require_empty_project=True,
+            manifest=manifest, files=[], idem=key,
         )
         queue_wake.set()
         return JSONResponse(result, status_code=202)
@@ -2231,6 +2407,11 @@ def create_app(settings: Settings) -> Starlette:
             if stage.resolve().is_relative_to(stage_root.resolve()):
                 shutil.rmtree(stage, ignore_errors=True)
 
+    def _advance_text_index(head: str) -> None:
+        """Advance the text index in the write path, never the embedding pass."""
+        with repo.pinned():
+            index.ensure(repo, head)
+
     async def _queue_loop() -> None:
         """Process jobs until shutdown, surviving transient queue/storage failures.
 
@@ -2260,6 +2441,13 @@ def create_app(settings: Settings) -> Starlette:
                         write_queue.finish, job["id"], error=failure.to_dict()["error"]
                     )
                 else:
+                    # Advance the *text* index here, before the job is marked
+                    # committed, so `indexed_head == head` as soon as the queue
+                    # drains. Vectors still run in the background; `flush` must
+                    # never wait for them.
+                    head = result.get("head") if isinstance(result, dict) else None
+                    if head:
+                        await asyncio.to_thread(_advance_text_index, head)
                     await asyncio.to_thread(write_queue.finish, job["id"], result=result)
                     reindexer.request()
             except asyncio.CancelledError:
@@ -2305,6 +2493,7 @@ def create_app(settings: Settings) -> Starlette:
     app.state.registry = registry
     app.state.lock = lock
     app.state.index = index
+    app.state.catalog = catalog
     app.state.vectors = vectors
     app.state.reindexer = reindexer
     app.state.write_queue = write_queue

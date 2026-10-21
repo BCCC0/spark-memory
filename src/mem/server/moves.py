@@ -9,7 +9,7 @@ import base64
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..errors import MemError
+from ..errors import MemError, not_found
 from ..ids import note_relpath, text_relpath, validate_id
 from ..pointers import pointer_record
 from . import frontmatter as fm
@@ -108,6 +108,9 @@ def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
 
     head = repo.head()
     metas = [meta for meta in repo.notes() if meta.project == project]
+    # One batched read for the whole project: planning used to spawn two git
+    # processes per note even when the move touched one record.
+    bodies = repo.read_notes([meta.path for meta in metas])
     selected = [meta for meta in metas if (meta.id.startswith(source + "/") if folder else meta.id == source)]
     if not selected:
         raise MemError("not_found", f"no {'topic' if folder else 'record'} at {source}")
@@ -125,7 +128,9 @@ def plan_move(repo: MemoryRepo, project: str, source: str, destination: str,
     bytes_affected = 0
 
     for meta in metas:
-        raw = repo.note_bytes(meta.path)
+        raw = bodies.get(meta.path)
+        if raw is None:
+            raise not_found(f"{meta.path} does not exist at {head}")
         new_id = mapping.get(meta.id)
         new_path = (note_relpath(project, new_id) if meta.path.endswith(".md")
                     else text_relpath(project, new_id)) if new_id else meta.path
