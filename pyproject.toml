@@ -19,7 +19,7 @@ urls = {Homepage = "https://github.com/BCCC0/spark-memory", Issues = "https://gi
 dependencies = [
     "starlette>=0.37",
     "uvicorn>=0.30",
-    "python-multipart>=0.0.9",
+    "python-multipart>=0.0.32",
     "pyyaml>=6.0",
 ]
 
