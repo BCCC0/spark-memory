@@ -200,15 +200,17 @@ def test_recover_committed_move_records_replay(ready):
     body = destination.read_bytes()
     destination.unlink()
     journal = ready.state / "move-journal.json"
+    device_id = ready.cli_json("devices")[0]["device_id"]
+    scoped = f"demo:{device_id}:mv:crash-replay"
     journal.write_text(json.dumps({
         "head": old_head, "paths": ["projects/demo/a.md", "projects/demo/b.md"],
         "before": {"projects/demo/a.md": None, "projects/demo/b.md": None},
         "after": {"projects/demo/a.md": None,
                   "projects/demo/b.md": base64.b64encode(body).decode("ascii")},
-        "key": "crash-replay", "response": {"source": "a", "destination": "b"},
+        "key": scoped, "response": {"source": "a", "destination": "b"},
         "message": "mem: mv a b",
     }), encoding="utf-8")
     store = IdempotencyStore(ready.state / "idempotency.json")
     assert recover_move(MemoryRepo(ready.repo), ready.state, store) is True
     assert destination.read_bytes() == body
-    assert store.get("crash-replay")["head"] == result["head"]
+    assert store.get(scoped)["head"] == result["head"]

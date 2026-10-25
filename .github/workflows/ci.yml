@@ -10,6 +10,10 @@ permissions:
 jobs:
   go-client:
     runs-on: ubuntu-latest
+    env:
+      # The help fixture is argparse output; 3.13+ changed option formatting
+      # ("-m, --message"), so generation must use one pinned interpreter.
+      UV_PYTHON: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
@@ -20,9 +24,11 @@ jobs:
           version: latest
       - name: Check Python contract vectors
         run: |
-          uv sync --extra dev --extra embed
-          uv run python tools/gen_client_vectors.py
-          uv run python tools/gen_client_help.py
+          uv python install 3.12
+          uv sync --python 3.12 --extra dev --extra embed
+          uv run --python 3.12 python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          uv run --python 3.12 python tools/gen_client_vectors.py
+          uv run --python 3.12 python tools/gen_client_help.py
           git diff --exit-code -- client/testdata/vectors/rules.json client/internal/cli/help.json
       - name: Test Go client
         working-directory: client

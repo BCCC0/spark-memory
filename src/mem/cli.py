@@ -2094,6 +2094,16 @@ def _hook_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hook_timeout(count: int) -> float:
+    """The per-batch client timeout for a hook upload.
+
+    The timeout covers local capture + upload + the server commit, not just the
+    commit. Scale it with the batch (up to the server's 1,000-item cap) and keep
+    a hard ceiling so a wedged server cannot hang a post-commit hook forever.
+    """
+    return max(180.0, min(900.0, 0.5 * count + 60.0))
+
+
 def _hook_update(args: argparse.Namespace) -> int:
     """Capture every tracked path committed since the last capture.
 
@@ -2206,16 +2216,24 @@ def _hook_update(args: argparse.Namespace) -> int:
         return 0
 
     if matched:
+        batch_timeout = _hook_timeout(len(matched))
         try:
-            client = _client(config, args, timeout=180)
+            client = _client(config, args, timeout=batch_timeout)
             policy = client.policy()
+            committed = tracking.committed_bytes_many(rev, matched, repo)
         except MemError as exc:
             result["errors"].append(f"{', '.join(matched)}: {exc.message}")
         else:
             items: list[dict[str, Any]] = []
             for path in matched:
+                content = committed.get(path)
+                if content is None:
+                    result["errors"].append(f"{path}: does not exist at {rev}")
+                    continue
                 try:
-                    items.append(_prepare_capture(repo, rev, path, config, policy))
+                    items.append(_prepare_capture(
+                        repo, rev, path, config, policy, content=content,
+                    ))
                 except MemError as exc:
                     result["errors"].append(f"{path}: {exc.message}")
                 except Exception as exc:  # noqa: BLE001 - hooks must report, not crash
@@ -2286,8 +2304,8 @@ def _hook_update(args: argparse.Namespace) -> int:
 
 
 def _prepare_capture(repo: Path, rev: str, path: str, config: cfg.ClientConfig,
-                     policy: dict[str, Any]) -> dict[str, Any]:
-    """Prepare the latest committed bytes without changing memory."""
+                     policy: dict[str, Any], *, content: bytes) -> dict[str, Any]:
+    """Prepare committed bytes that the caller already read in one batch."""
     from .pointers import parse_pointer
 
     allowed = set(policy["inline_extensions"])
@@ -2302,7 +2320,6 @@ def _prepare_capture(repo: Path, rev: str, path: str, config: cfg.ClientConfig,
         _require_origin_inside(
             working, config.marker_path.parent if config.marker_path else Path.cwd()
         )
-        content = tracking.committed_bytes(rev, path, repo)
         if len(content) > policy["max_upload_bytes"]:
             raise MemError(
                 "invalid_request",

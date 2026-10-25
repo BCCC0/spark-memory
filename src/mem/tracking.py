@@ -214,6 +214,52 @@ def committed_bytes(rev: str, path: str, repo: Path, *, runner: Callable | None 
     return result.stdout
 
 
+def committed_bytes_many(
+    rev: str, paths: Iterable[str], repo: Path
+) -> dict[str, bytes | None]:
+    """Read many committed blobs with one git cat-file --batch process.
+
+    A hook batch can carry 1,000 files; one git show per file dominated the
+    post-commit hook. Missing paths map to None so the caller can report them
+    together.
+    """
+    wanted = list(dict.fromkeys(paths))
+    if not wanted:
+        return {}
+    payload = ("\n".join(f"{rev}:{path}" for path in wanted) + "\n").encode("utf-8")
+    result = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=str(repo),
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise MemError(
+            "not_found",
+            f"cannot read {len(wanted)} path(s) at {rev}",
+            {"rev": rev},
+        )
+    raw = result.stdout
+    position = 0
+    bodies: dict[str, bytes | None] = {}
+    for path in wanted:
+        newline = raw.find(b"\n", position)
+        if newline < 0:
+            raise MemError("internal_error", "truncated output from git cat-file")
+        header = raw[position:newline].decode("utf-8", "replace")
+        parts = header.rsplit(" ", 2)
+        if len(parts) == 3 and parts[1] == "blob" and parts[2].isdigit():
+            size = int(parts[2])
+            start = newline + 1
+            bodies[path] = raw[start:start + size]
+            position = start + size + 1
+        else:
+            bodies[path] = None
+            position = newline + 1
+    return bodies
+
+
 # -- watermark -------------------------------------------------------------
 
 

@@ -7,7 +7,22 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestHookTimeoutScalesWithBatch(t *testing.T) {
+	cases := map[int]time.Duration{
+		1:     180 * time.Second,
+		101:   180 * time.Second,
+		1000:  560 * time.Second,
+		10000: 900 * time.Second,
+	}
+	for count, want := range cases {
+		if got := hookTimeout(count); got != want {
+			t.Fatalf("hookTimeout(%d) = %s, want %s", count, got, want)
+		}
+	}
+}
 
 func TestHookInstallPreservesUserContent(t *testing.T) {
 	repo := t.TempDir()
