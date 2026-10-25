@@ -8,7 +8,7 @@ from pathlib import Path
 __version__ = "0.2.0"
 
 # API/version string reported by GET /health and used to detect a stale daemon.
-API_VERSION = "mem/0.1"
+API_VERSION = "mem/0.2"
 
 
 @lru_cache(maxsize=1)

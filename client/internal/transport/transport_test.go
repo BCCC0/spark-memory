@@ -25,7 +25,7 @@ func TestMultipartRequestAndTypedResponse(t *testing.T) {
 		if got := r.Header.Get("If-Match"); got != "rev" {
 			t.Errorf("precondition: %q", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != "mem/0.1" {
+		if got := r.Header.Get("User-Agent"); got != "mem/0.2" {
 			t.Errorf("user agent: %q", got)
 		}
 		if err := r.ParseMultipartForm(1024); err != nil {

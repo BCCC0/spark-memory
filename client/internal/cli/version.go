@@ -9,7 +9,7 @@ import (
 // Version and Commit are overridden by the release build with -ldflags. A
 // normal development build falls back to the Go VCS stamp, then to "unknown".
 var (
-	Version = "0.1.2"
+	Version = "0.2.0"
 	Commit  string
 )
 

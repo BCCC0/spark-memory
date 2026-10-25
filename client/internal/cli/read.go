@@ -284,7 +284,7 @@ func flush(cl *transport.Client) (any, string, error) {
 	deadline := time.Now().Add(flushTimeout)
 	for object(result)["pending"] != float64(0) {
 		if time.Now().After(deadline) {
-			return nil, "", memerr.New("lock_timeout", "flush timed out waiting for queued writes and indexing", map[string]any{"through": through})
+			return nil, "", memerr.New("lock_timeout", "flush timed out waiting for queued writes", map[string]any{"through": through})
 		}
 		time.Sleep(100 * time.Millisecond)
 		result, err = req(cl, "GET", "/v1/queue", map[string]string{"through": str(through)}, nil, nil)

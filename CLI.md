@@ -1,18 +1,18 @@
 # `mem` CLI behavior
 
-This is the user-facing contract for queued writes.
+This is the user-facing contract for writes.
 
 ## Identifying the client and daemon
 
 ```text
 $ mem --version
-mem 0.1.2 (go, commit 5b1338c56dfb)
+mem 0.2.0 (go, commit 3ad159e511a8)
 
 $ mem --version
-mem 0.1.2 (python, commit 5b1338c56dfb)
+mem 0.2.0 (python, commit 3ad159e511a8)
 
 $ memd --version
-memd 0.1.2 (python, commit 5b1338c56dfb)
+memd 0.2.0 (python, commit 3ad159e511a8)
 ```
 
 The implementation name is part of the output because both the Go client and the
@@ -120,17 +120,17 @@ Path mode is strictly in-project:
 ID mode keeps the existing topic/reference semantics and never touches local
 files. Use `--expect` for path mode and `--expect-head` for ID mode.
 
-Both forms are blocking:
+Both forms block until the server commits:
 
-1. wait for the write queue to drain;
-2. submit an exclusive move;
-3. wait for its job to commit;
-4. report the final result.
+1. plan the move against the current HEAD;
+2. submit it under the write lock (a move journals before touching the tree);
+3. wait for its commit and report the final result.
 
-`mem flush` therefore waits for a running `mem mv`. A path move renames the local
-file first and renames it back if the server job fails. There is still no
-cross-system transaction: a crash between the local rename and the commit can
-leave them inconsistent. `mem status --origins` reports that state.
+`mem flush` is a compatibility no-op: writes are already committed when the
+command returns. A path move renames the local file first and renames it back
+if the server commit fails. There is still no cross-system transaction: a crash
+between the local rename and the commit can leave them inconsistent.
+`mem status --origins` reports that state.
 
 Hooks do not auto-detect `git mv`; a `git mv` captured by `mem hook` appears as a
 new path plus an orphaned old path, not as a move.
