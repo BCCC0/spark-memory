@@ -1064,20 +1064,35 @@ class Reindexer:
             else:
                 stale = [
                     meta for meta in metas
-                    if self._source_cache.get(meta.path, ("", None))[0] != hashes.get(meta.path, "")
+                    if (cached := self._source_cache.get(meta.path)) is None
+                    or not hashes.get(meta.path)
+                    or cached[0] != hashes.get(meta.path)
                 ]
             bodies = self._repo.read_notes([meta.path for meta in stale]) if stale else {}
             sources: dict[str, Any] = {}
             for meta in metas:
-                sha = hashes.get(meta.path, "")
+                body = bodies.get(meta.path)
                 cached = self._source_cache.get(meta.path)
-                if cached is not None and sha and cached[0] == sha:
+                if body is None:
+                    # The catalog and the pinned tree disagree, or the blob
+                    # vanished; do not invent a cache entry for bytes we did
+                    # not read.
+                    if cached is not None:
+                        sources[meta.path] = cached[1]
+                    else:
+                        sources[meta.path] = note_source(self._repo, meta.path, None)
+                    continue
+                # Key the cache by the sha of the bytes actually read. The
+                # catalog may have advanced to a newer commit while this pass
+                # is pinned to an older one; trusting the catalog sha would
+                # cache the old body under the new hash and serve it forever.
+                actual = hashlib.sha256(body).hexdigest()
+                if cached is not None and cached[0] == actual:
                     sources[meta.path] = cached[1]
                     continue
-                source = note_source(self._repo, meta.path, bodies.get(meta.path))
+                source = note_source(self._repo, meta.path, body)
                 sources[meta.path] = source
-                if sha:
-                    self._source_cache[meta.path] = (sha, source)
+                self._source_cache[meta.path] = (actual, source)
             alive = {meta.path for meta in metas}
             self._source_cache = {
                 path: entry for path, entry in self._source_cache.items() if path in alive
@@ -1555,7 +1570,7 @@ def create_app(settings: Settings) -> Starlette:
 
     def _add_commit(
         *, device_id: str, project: str, rel: str, note_id: str, injected: bytes,
-        message: str, key: str | None, if_match: str | None,
+        message: str, if_match: str | None,
         work: MemoryRepo | None = None,
     ) -> dict[str, Any]:
         """Run the complete locked add transaction in a worker thread.
@@ -1575,11 +1590,6 @@ def create_app(settings: Settings) -> Starlette:
             becoming_pointer = rel.endswith(".md") and pointer_record(injected.decode("utf-8", "replace")) is not None
             if prior_bytes is not None and not was_pointer and becoming_pointer:
                 raise MemError("invalid_request", f"{note_id} stores content; remove it before adding a pointer")
-            if key:
-                cached = store.get(key)
-                if cached is not None and prior_bytes is not None and existing == rel and was_pointer == becoming_pointer:
-                    return _replay_result(cached)
-
             target = work.root / rel
             if existing != rel and prior_bytes is not None and not was_pointer:
                 raise MemError("invalid_request", f"{note_id} already exists as {existing}; remove it before changing storage kind")
@@ -1619,8 +1629,6 @@ def create_app(settings: Settings) -> Starlette:
                 "changed": committed["changed"],
                 "idempotent_replay": False,
             }
-            if key:
-                store.put(key, result)
             return result
 
     def _preflight_add(project: str, note_id: str, rel: str,
@@ -1640,6 +1648,42 @@ def create_app(settings: Settings) -> Starlette:
             if if_match is not None and if_match != actual:
                 raise MemError("stale_revision", f"{note_id} has moved since {if_match[:12]}",
                                {"expected": if_match, "actual": actual})
+
+    def _preflight_add_many(project: str, items: list[dict[str, Any]]) -> None:
+        """Validate a batch before the lock, with one listing and one batch read.
+
+        The per-item helper shells out for every existing note; a 1,000-file
+        hook batch would pay that 1,000 times. The semantics are identical.
+        """
+        with repo.pinned():
+            known = set(repo.list_note_paths())
+            checks: list[tuple[dict[str, Any], str, bool]] = []
+            to_read: list[str] = []
+            for item in items:
+                existing = repo.public_path(project, item["id"], allow_missing=True)
+                has_old = existing in known
+                if has_old:
+                    to_read.append(existing)
+                checks.append((item, existing, has_old))
+            bodies = repo.read_notes(to_read) if to_read else {}
+            for item, existing, has_old in checks:
+                old = bodies.get(existing) if has_old else None
+                was_pointer = (old is not None and existing.endswith(".md")
+                               and pointer_record(old.decode("utf-8", "replace")) is not None)
+                becoming_pointer = (item["rel"].endswith(".md")
+                                    and pointer_record(item["content"].decode("utf-8", "replace")) is not None)
+                if old is not None and not was_pointer and becoming_pointer:
+                    raise MemError("invalid_request", f"{item['id']} stores content; remove it before adding a pointer")
+                if old is not None and existing != item["rel"] and not was_pointer:
+                    raise MemError("invalid_request", f"{item['id']} already exists as {existing}")
+                if item["if_match"] is not None:
+                    actual = repo.sha256_bytes(old) if old is not None else None
+                    if item["if_match"] != actual:
+                        raise MemError(
+                            "stale_revision",
+                            f"{item['id']} has moved since {item['if_match'][:12]}",
+                            {"expected": item["if_match"], "actual": actual},
+                        )
 
     def _preflight_remove(project: str, note_id: str, if_match: str) -> None:
         with repo.pinned():
@@ -1713,60 +1757,68 @@ def create_app(settings: Settings) -> Starlette:
 
     def _rm_commit(
         *, device_id: str, project: str, rel: str, note_id: str,
-        message: str, key: str | None, if_match: str | None,
+        message: str, if_match: str | None,
         work: MemoryRepo | None = None,
     ) -> dict[str, Any]:
-        """Run the complete locked remove transaction in a worker thread."""
+        """Run the complete locked remove transaction in a worker thread.
+
+        Git HEAD is the record. A worktree file that is not in HEAD is
+        untracked operator content: report it absent and never unlink it.
+        """
         work = work or repo
         target = work.root / rel
         with lock.hold(device_id):
-            if key:
-                cached = store.get(key)
-                if cached is not None:
-                    return _replay_result(cached)
-
-            existed = target.is_file()
-            # The queue used to run each job in a worktree checked out from HEAD,
-            # so a worktree deletion still left the blob tracked. Inline writes
-            # run in the served tree, so existence must be judged from HEAD too.
-            tracked = True if existed else work.is_tracked(rel)
-            if not tracked and if_match is not None:
-                raise MemError(
-                    "stale_revision", f"{note_id} does not exist",
-                    {"expected": if_match, "actual": None},
-                )
-            original = target.read_bytes() if existed else (
-                work.note_bytes(rel) if tracked else None
-            )
-            if tracked and if_match is not None:
-                current = work.sha256_bytes(original)
+            try:
+                head_bytes = work.note_bytes(rel)
+            except MemError as exc:
+                if exc.code != "not_found":
+                    raise
+                head_bytes = None
+            if head_bytes is None:
+                if if_match is not None:
+                    raise MemError(
+                        "stale_revision", f"{note_id} does not exist",
+                        {"expected": if_match, "actual": None},
+                    )
+                return {
+                    "id": note_id,
+                    "project": project,
+                    "path": rel,
+                    "removed": False,
+                    "already_absent": True,
+                    "head": work.head(),
+                    "message": None,
+                    "changed": False,
+                    "idempotent_replay": False,
+                }
+            if if_match is not None:
+                current = work.sha256_bytes(head_bytes)
                 if if_match != current:
                     raise MemError(
                         "stale_revision",
                         f"{note_id} has moved since {if_match[:12]}",
                         {"expected": if_match, "actual": current},
                     )
+            existed = target.is_file()
+            previous = target.read_bytes() if existed else None
             try:
                 work.remove_note(rel)
                 committed = work.commit_paths(message, [rel], device_id=device_id)
             except Exception:
-                work.rollback_path(rel, restore=original if existed else None)
+                work.rollback_path(rel, restore=previous)
                 raise
 
-            result = {
+            return {
                 "id": note_id,
                 "project": project,
                 "path": rel,
-                "removed": tracked,
-                "already_absent": not tracked,
+                "removed": True,
+                "already_absent": False,
                 "head": committed["head"],
                 "message": message if committed["changed"] else None,
                 "changed": committed["changed"],
                 "idempotent_replay": False,
             }
-            if key:
-                store.put(key, result)
-            return result
 
     async def add(request: Request) -> JSONResponse:
         """Write **and version** one note, as a single atomic act (S23/S28).
@@ -1832,8 +1884,10 @@ def create_app(settings: Settings) -> Starlette:
 
         key = request.headers.get("idempotency-key")
         if_match = request.headers.get("if-match")
+        # Validate before replaying: a stale key must not turn a content to
+        # pointer downgrade into a replay of the original pointer write.
         await asyncio.to_thread(_preflight_add, project, note_id, rel, injected)
-        prior = _idem_lookup(project, device["device_id"], key)
+        prior = _idem_lookup(project, device["device_id"], "add", key)
         if prior:
             return JSONResponse(prior, status_code=200)
         if if_match:
@@ -1861,6 +1915,7 @@ def create_app(settings: Settings) -> Starlette:
             raise MemError("invalid_request", "items must be a JSON array") from exc
         if not isinstance(metadata, list) or not 2 <= len(metadata) <= 1000:
             raise MemError("invalid_request", "batch needs 2-1000 items")
+        key = request.headers.get("idempotency-key")
         prepared: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         total_bytes = 0
@@ -1915,10 +1970,16 @@ def create_app(settings: Settings) -> Starlette:
             await asyncio.to_thread(content_path.write_bytes, injected)
             prepared.append({"id": note_id, "rel": rel, "kind": kind, "content": content_path})
 
-        key = request.headers.get("idempotency-key")
-        for item in prepared:
-            await asyncio.to_thread(_preflight_add, project, item["id"], item["rel"],
-                                    await asyncio.to_thread(item["content"].read_bytes))
+        checks = [{
+            "id": item["id"],
+            "rel": item["rel"],
+            "if_match": None,
+            "content": await asyncio.to_thread(item["content"].read_bytes),
+        } for item in prepared]
+        await asyncio.to_thread(_preflight_add_many, project, checks)
+        prior = _idem_lookup(project, device["device_id"], "add-many", key)
+        if prior:
+            return JSONResponse(prior, status_code=200)
 
         manifest = {"file_count": len(prepared), "device_id": device["device_id"],
                     "project": project, "message": message,
@@ -1953,7 +2014,7 @@ def create_app(settings: Settings) -> Starlette:
         dry_run = payload.get("dry_run") is True
         key = request.headers.get("idempotency-key")
         if_match = request.headers.get("if-match")
-        prior = _idem_lookup(project, device["device_id"], key)
+        prior = _idem_lookup(project, device["device_id"], "repath", key)
         if prior:
             return JSONResponse(prior, status_code=200)
         meta, _data, raw = await asyncio.to_thread(
@@ -2012,7 +2073,7 @@ def create_app(settings: Settings) -> Starlette:
 
         key = request.headers.get("idempotency-key")
         if_match = request.headers.get("if-match")
-        prior = _idem_lookup(project, device["device_id"], key)
+        prior = _idem_lookup(project, device["device_id"], "rm", key)
         if prior:
             return JSONResponse(prior, status_code=200)
         if if_match:
@@ -2045,7 +2106,7 @@ def create_app(settings: Settings) -> Starlette:
         expected_head = request.headers.get("if-match")
 
         if not dry_run:
-            prior = _idem_lookup(project, device["device_id"], key)
+            prior = _idem_lookup(project, device["device_id"], "mv", key)
             if prior:
                 return JSONResponse(prior, status_code=200)
 
@@ -2181,12 +2242,13 @@ def create_app(settings: Settings) -> Starlette:
                                 for item in items]}
 
     def _apply_write(kind: str, manifest: dict[str, Any],
-                     files: list[bytes], work: MemoryRepo) -> dict[str, Any]:
+                     files: list[bytes], work: MemoryRepo,
+                     idem: str | None = None) -> dict[str, Any]:
         if kind == "add":
             result = _add_commit(
                 device_id=manifest["device_id"], project=manifest["project"],
                 rel=manifest["rel"], note_id=manifest["id"], injected=files[0],
-                message=manifest["message"], key=None,
+                message=manifest["message"],
                 if_match=manifest["if_match"],
                 work=work,
             )
@@ -2200,7 +2262,7 @@ def create_app(settings: Settings) -> Starlette:
             return _rm_commit(
                 device_id=manifest["device_id"], project=manifest["project"],
                 rel=manifest["rel"], note_id=manifest["id"],
-                message=manifest["message"], key=None,
+                message=manifest["message"],
                 if_match=manifest["if_match"],
                 work=work,
             )
@@ -2221,7 +2283,8 @@ def create_app(settings: Settings) -> Starlette:
                                {"expected": manifest["expected_head"], "actual": plan.head})
             return commit_move(work, settings.state_dir, plan,
                                message=manifest["message"],
-                               device_id=manifest["device_id"])
+                               device_id=manifest["device_id"],
+                               key=idem, store=store)
         raise MemError("internal_error", f"unknown operation {kind}")
 
     def _advance_text_index(head: str) -> None:
@@ -2237,10 +2300,17 @@ def create_app(settings: Settings) -> Starlette:
         except Exception:  # noqa: BLE001 - a derived index must not fail a commit
             logger.exception("text index advance failed; left to the reindexer")
 
-    def _idem_lookup(project: str, device_id: str, idem: str | None) -> dict[str, Any] | None:
+    @staticmethod
+    def _idem_key(project: str, device_id: str, kind: str, idem: str) -> str:
+        # The operation is part of the key. Otherwise a key reused by add and rm
+        # would replay the add and silently skip the remove.
+        return f"{project}:{device_id}:{kind}:{idem}"
+
+    def _idem_lookup(project: str, device_id: str, kind: str,
+                     idem: str | None) -> dict[str, Any] | None:
         if not idem:
             return None
-        prior = store.get(f"{project}:{device_id}:{idem}")
+        prior = store.get(_idem_key(project, device_id, kind, idem))
         if prior is None:
             return None
         return {**prior, "idempotent_replay": True}
@@ -2253,19 +2323,24 @@ def create_app(settings: Settings) -> Starlette:
         The commit is durable when this returns. Catalog and text index are
         updated in the same critical section; only the vector worker is told
         which paths changed, and it can never block the write.
+
+        The idempotency lookup, the write and the replay entry share that one
+        critical section. A lookup outside it can be followed by a second
+        writer that executes the same request before the first one stores its
+        result, which is exactly the duplicate this map exists to prevent.
         """
         device_id = manifest.get("device_id", "")
         # Large multipart uploads arrive as temp paths; the commit helpers take
         # bytes. The request caps bound this materialisation.
         files = [item.read_bytes() if isinstance(item, Path) else item for item in files]
-        scoped = f"{project}:{device_id}:{idem}" if idem else None
-        if scoped:
-            prior = store.get(scoped)
-            if prior is not None:
-                return {**prior, "idempotent_replay": True}
+        scoped = _idem_key(project, device_id, kind, idem) if idem else None
         with lock.hold(device_id):
+            if scoped:
+                prior = store.get(scoped)
+                if prior is not None:
+                    return {**prior, "idempotent_replay": True}
             base = repo.head()
-            result = _apply_write(kind, manifest, files, repo)
+            result = _apply_write(kind, manifest, files, repo, idem=scoped)
             head = result.get("head") or base
             if head != base:
                 _advance_text_index(head)
@@ -2277,40 +2352,67 @@ def create_app(settings: Settings) -> Starlette:
                     reindexer.enqueue(repo.changed_paths(base, head))
                 except Exception:  # noqa: BLE001
                     logger.exception("could not enqueue changed paths for reindex")
-        out = {
-            "status": "committed",
-            "receipt": "w_" + uuid.uuid4().hex,
-            "seq": 0,
-            "affected_ids": sorted(set(targets)),
-            "head": head,
-            **{key: value for key, value in result.items() if key != "head"},
-            "idempotent_replay": False,
-        }
-        if scoped:
-            try:
-                store.put(scoped, out)
-            except OSError:
-                logger.warning("idempotency store write failed", exc_info=True)
-        return out
+            out = {
+                "status": "committed",
+                "receipt": "w_" + uuid.uuid4().hex,
+                "seq": 0,
+                "affected_ids": sorted(set(targets)),
+                "head": head,
+                **{key: value for key, value in result.items() if key != "head"},
+                "idempotent_replay": False,
+            }
+            if scoped:
+                # A degraded idempotency store must not turn a committed write
+                # into an error: the content is already durable.
+                try:
+                    store.put(scoped, out)
+                except Exception:  # noqa: BLE001
+                    logger.warning("idempotency store write failed", exc_info=True)
+            return out
 
     def _drain_legacy_queue() -> None:
         """Run jobs left by a 0.1.x daemon, then never touch the queue again."""
         from .queue import WriteQueue  # migration only
 
         legacy = WriteQueue(settings.state_dir, settings.repo_root)
+        try:
+            # This is the only place that resets jobs left in 'running' by a
+            # killed 0.1.x worker back to 'queued'; without it those payloads
+            # sit in the spool forever.
+            legacy.claim_worker()
+        except MemError as exc:
+            if exc.code != "target_busy":
+                raise
+            logger.warning(
+                "legacy write queue is owned by another process; skipping drain"
+            )
+            return
         drained = 0
-        while True:
-            job = legacy.next_job()
-            if job is None:
-                break
-            try:
-                manifest, files = legacy.payload(job["id"])
-                with lock.hold("migration"):
-                    result = _apply_write(job["kind"], manifest, files, repo)
-                legacy.finish(job["id"], result=result)
-                drained += 1
-            except Exception as exc:  # noqa: BLE001 - report, keep draining
-                legacy.finish(job["id"], error={"code": "internal_error", "message": str(exc)})
+        try:
+            while True:
+                job = legacy.next_job()
+                if job is None:
+                    break
+                try:
+                    prepared_head = job.get("prepared_head")
+                    prepared_result = job.get("prepared_result")
+                    if prepared_head and prepared_result:
+                        head = repo.head()
+                        if head == prepared_head or repo.is_ancestor(prepared_head, head):
+                            # The old worker committed the content before it
+                            # died; finish the job instead of applying it again.
+                            legacy.finish(job["id"], result=json.loads(prepared_result))
+                            drained += 1
+                            continue
+                    manifest, files = legacy.payload(job["id"])
+                    with lock.hold("migration"):
+                        result = _apply_write(job["kind"], manifest, files, repo)
+                    legacy.finish(job["id"], result=result)
+                    drained += 1
+                except Exception as exc:  # noqa: BLE001 - report, keep draining
+                    legacy.finish(job["id"], error={"code": "internal_error", "message": str(exc)})
+        finally:
+            legacy.release_worker()
         if drained:
             logger.warning("drained %d queued write(s) from the 0.1.x queue", drained)
 

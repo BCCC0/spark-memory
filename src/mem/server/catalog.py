@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -54,6 +55,10 @@ class Catalog:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Reads and the reindex worker can call ensure() at the same time. A
+        # rewrite based on a stale "current" stamp can regress the head, so the
+        # read-check-write sequence is serialised.
+        self._lock = threading.RLock()
         with self._connect() as conn:
             conn.executescript(SCHEMA)
 
@@ -160,50 +165,63 @@ class Catalog:
         return count
 
     def rebuild(self, repo: MemoryRepo, head: str | None) -> int:
-        paths = repo.list_note_paths()
-        bodies = repo.read_notes(paths, head)
-        times = repo.commit_index()
-        rows = [self._row(path, bodies[path], times) for path in paths if bodies.get(path) is not None]
-        with self._connect() as conn:
-            conn.execute("DELETE FROM catalog")
-            count = self._write_rows(conn, rows)
-            self._stamp(conn, head)
-        return count
+        with self._lock:
+            paths = repo.list_note_paths()
+            bodies = repo.read_notes(paths, head)
+            times = repo.commit_index()
+            rows = [self._row(path, bodies[path], times) for path in paths if bodies.get(path) is not None]
+            with self._connect() as conn:
+                conn.execute("DELETE FROM catalog")
+                count = self._write_rows(conn, rows)
+                self._stamp(conn, head)
+            return count
 
     def ensure(self, repo: MemoryRepo, head: str | None) -> bool:
-        """Bring the catalog to *head*; returns True when anything changed."""
+        """Bring the catalog to *head*; returns True when anything changed.
+
+        A request pinned to an older commit must never rewrite the shared
+        catalog backwards: when the requested head is an ancestor of the
+        stamped head the newer rows are kept. Rewrites are reserved for truly
+        divergent history.
+        """
         if not head:
             return False
-        current = self.head()
-        if current == head:
-            return False
-        if current and repo.is_ancestor(current, head):
-            changed = repo.changed_paths(current, head)
-            if changed:
-                bodies = repo.read_notes(changed, head)
-                times = repo.commit_index()
-                rows: list[tuple[Any, ...]] = []
-                removed: list[str] = []
-                for path in changed:
-                    body = bodies.get(path)
-                    # A deleted path, a note that stopped being UTF-8, or one
-                    # whose frontmatter broke all mean "no row": the old row must
-                    # not survive a head stamp.
-                    row = None if body is None else self._row(path, body, times)
-                    if row is None:
-                        removed.append(path)
-                    else:
-                        rows.append(row)
-                with self._connect() as conn:
-                    conn.executemany("DELETE FROM catalog WHERE path=?", [(p,) for p in removed])
-                    self._write_rows(conn, rows)
-                    self._stamp(conn, head)
-            else:
-                with self._connect() as conn:
-                    self._stamp(conn, head)
+        with self._lock:
+            current = self.head()
+            if current == head:
+                return False
+            if current and repo.is_ancestor(head, current):
+                # The requested revision is behind what is already stamped.
+                # Serving newer rows is safe; rewinding the shared read model is
+                # not (a concurrent reader would lose rows it just published).
+                return False
+            if current and repo.is_ancestor(current, head):
+                changed = repo.changed_paths(current, head)
+                if changed:
+                    bodies = repo.read_notes(changed, head)
+                    times = repo.commit_index()
+                    rows: list[tuple[Any, ...]] = []
+                    removed: list[str] = []
+                    for path in changed:
+                        body = bodies.get(path)
+                        # A deleted path, a note that stopped being UTF-8, or one
+                        # whose frontmatter broke all mean "no row": the old row must
+                        # not survive a head stamp.
+                        row = None if body is None else self._row(path, body, times)
+                        if row is None:
+                            removed.append(path)
+                        else:
+                            rows.append(row)
+                    with self._connect() as conn:
+                        conn.executemany("DELETE FROM catalog WHERE path=?", [(p,) for p in removed])
+                        self._write_rows(conn, rows)
+                        self._stamp(conn, head)
+                else:
+                    with self._connect() as conn:
+                        self._stamp(conn, head)
+                return True
+            self.rebuild(repo, head)
             return True
-        self.rebuild(repo, head)
-        return True
 
     # -- reading -----------------------------------------------------------
 

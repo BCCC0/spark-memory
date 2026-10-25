@@ -350,6 +350,20 @@ func deletedTracked(repo, rev, since string, patterns []string) []string {
 	return tracking.Selected(patterns, tracking.SplitNUL(raw))
 }
 
+// hookTimeout is the per-batch client timeout for a hook upload. It covers
+// local capture + upload + the server commit, scales with the batch, and is
+// capped so a wedged server cannot hang a post-commit hook forever.
+func hookTimeout(count int) time.Duration {
+	seconds := 180.0
+	if scaled := 0.5*float64(count) + 60.0; scaled > seconds {
+		seconds = scaled
+	}
+	if seconds > 900 {
+		seconds = 900
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
 func hookUpdate(o options) (any, string, error) {
 	repo, err := hookRepo(o)
 	if err != nil {
@@ -463,7 +477,7 @@ func hookUpdate(o options) (any, string, error) {
 		return result, strings.Join(lines, "\n"), nil
 	}
 	if len(active) > 0 {
-		cl, e := client(o, c, 180e9)
+		cl, e := client(o, c, hookTimeout(len(active)))
 		if e != nil {
 			addError(e.Error())
 			return result, "", nil
@@ -474,9 +488,19 @@ func hookUpdate(o options) (any, string, error) {
 			return result, "", nil
 		}
 		policy := object(policyRaw)
+		committed, e := tracking.CatFileBatch(repo, rev, active)
+		if e != nil {
+			addError(strings.Join(active, ", ") + ": " + e.Error())
+			return result, "", nil
+		}
 		items := []item{}
 		for _, p := range active {
-			it, e := prepareCapture(repo, rev, p, c, policy)
+			content, ok := committed[p]
+			if !ok {
+				addError(p + ": does not exist at " + rev)
+				continue
+			}
+			it, e := prepareCapture(repo, rev, p, c, policy, content)
 			if e != nil {
 				addError(p + ": " + e.Error())
 			} else {
@@ -546,7 +570,7 @@ func lenSliceString(value any) int {
 	}
 	return 0
 }
-func prepareCapture(repo, rev, path string, c config.Config, policy map[string]any) (item, error) {
+func prepareCapture(repo, rev, path string, c config.Config, policy map[string]any, content []byte) (item, error) {
 	var it item
 	working := filepath.Join(repo, filepath.FromSlash(path))
 	id, err := derive(working, filepath.Dir(c.MarkerPath), "")
@@ -569,10 +593,6 @@ func prepareCapture(repo, rev, path string, c config.Config, policy map[string]a
 			return it, err
 		}
 		it.Origin = origin
-		content, err := tracking.Git(repo, "show", rev+":"+path)
-		if err != nil {
-			return it, err
-		}
 		it.Content = content
 		it.Kind = "text"
 		if ext == ".md" {

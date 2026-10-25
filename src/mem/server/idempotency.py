@@ -24,6 +24,8 @@ losing it costs at most a duplicate-detection window — never content.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,10 @@ class IdempotencyStore:
         self.path = Path(path)
         self.limit = limit
         self._data: dict[str, Any] = {}
+        # Writes are committed by several request threads after they leave the
+        # write lock; a dict iterated by json.dumps while another thread inserts
+        # raises "dictionary changed size during iteration". Serialise the map.
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self) -> None:
@@ -53,18 +59,28 @@ class IdempotencyStore:
             self._data = {}
 
     def _flush(self) -> None:
+        """Persist the map; the caller holds _lock.
+
+        Replace the file atomically so a crash mid-write leaves the previous
+        map intact instead of a truncated JSON document.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Trim oldest first; dict preserves insertion order.
         while len(self._data) > self.limit:
             self._data.pop(next(iter(self._data)))
-        self.path.write_text(json.dumps(self._data), encoding="utf-8")
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_text(json.dumps(self._data), encoding="utf-8")
+        os.replace(temporary, self.path)
 
     def get(self, key: str) -> Any | None:
-        return self._data.get(key)
+        with self._lock:
+            return self._data.get(key)
 
     def put(self, key: str, value: Any) -> None:
-        self._data[key] = value
-        self._flush()
+        with self._lock:
+            self._data[key] = value
+            self._flush()
 
     def __len__(self) -> int:
-        return len(self._data)
+        with self._lock:
+            return len(self._data)

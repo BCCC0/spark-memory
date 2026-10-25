@@ -1,11 +1,13 @@
 package tracking
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,50 @@ func Git(repo string, args ...string) ([]byte, error) {
 		return nil, memerr.New("invalid_request", "git "+strings.Join(args, " ")+" failed", nil)
 	}
 	return out, nil
+}
+
+// CatFileBatch reads many committed blobs with one git cat-file --batch
+// process. A hook batch can carry 1,000 files; one git show per file dominated
+// the post-commit hook. Missing paths are absent from the map.
+func CatFileBatch(repo, rev string, paths []string) (map[string][]byte, error) {
+	result := make(map[string][]byte, len(paths))
+	if len(paths) == 0 {
+		return result, nil
+	}
+	var input strings.Builder
+	for _, path := range paths {
+		input.WriteString(rev)
+		input.WriteString(":")
+		input.WriteString(path)
+		input.WriteString("\n")
+	}
+	cmd := exec.Command("git", "cat-file", "--batch")
+	cmd.Dir = repo
+	cmd.Stdin = strings.NewReader(input.String())
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, memerr.New("not_found", "cannot read committed paths at "+rev, nil)
+	}
+	position := 0
+	for _, path := range paths {
+		offset := bytes.IndexByte(out[position:], '\n')
+		if offset < 0 {
+			return nil, memerr.New("internal_error", "truncated output from git cat-file", nil)
+		}
+		newline := position + offset
+		fields := strings.Fields(string(out[position:newline]))
+		if len(fields) == 3 && fields[1] == "blob" {
+			size, parseErr := strconv.Atoi(fields[2])
+			if parseErr == nil {
+				start := newline + 1
+				result[path] = out[start : start+size]
+				position = start + size + 1
+				continue
+			}
+		}
+		position = newline + 1
+	}
+	return result, nil
 }
 func Root(dir string) (string, error) {
 	out, err := Git(dir, "rev-parse", "--show-toplevel")

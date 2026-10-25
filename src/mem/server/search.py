@@ -220,6 +220,10 @@ class SearchIndex:
         indexed = self.indexed_head()
         if indexed == head:
             return False
+        if indexed and repo.is_ancestor(head, indexed):
+            # A worker pinned to an older commit must not rebuild the shared
+            # text index backwards while a write has already advanced it.
+            return False
         if indexed and repo.is_ancestor(indexed, head):
             self.update(repo, head, repo.changed_paths(indexed, head))
         else:
