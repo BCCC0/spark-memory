@@ -142,7 +142,6 @@ func intField(value any, key string) int {
 	return 0
 }
 
-
 func waitJob(cl *transport.Client, receipt string, seq int) error {
 	deadline := time.Now().Add(flushTimeout)
 	for {
