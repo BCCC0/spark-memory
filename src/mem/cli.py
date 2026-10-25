@@ -745,7 +745,7 @@ def cmd_flush(args: argparse.Namespace) -> int:
         if time.monotonic() >= deadline:
             raise MemError(
                 "lock_timeout",
-                "flush timed out waiting for queued writes and indexing",
+                "flush timed out waiting for queued writes",
                 {"through": through},
             )
         time.sleep(0.1)

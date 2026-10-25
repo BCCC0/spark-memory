@@ -42,7 +42,7 @@ func (c *Client) request(httpClient *http.Client, method, path string, query url
 		return nil, memerr.New("invalid_request", err.Error(), nil)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "mem/0.1")
+	req.Header.Set("User-Agent", "mem/0.2")
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -117,7 +117,7 @@ func (c *Client) Raw(path string) ([]byte, error) {
 		return nil, memerr.New("invalid_request", err.Error(), nil)
 	}
 	req.Header.Set("Accept", "text/markdown")
-	req.Header.Set("User-Agent", "mem/0.1")
+	req.Header.Set("User-Agent", "mem/0.2")
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}

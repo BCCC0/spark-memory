@@ -325,10 +325,9 @@ mem read decisions/sqlite
 mem search "sqlite"
 ```
 
-`add` returns a **queued** receipt; `flush` waits for the write and the text
-index to reach the resulting head, but gives up after 3 minutes with
-`lock_timeout` (exit 3) if the index cannot catch up. A subsequent `read`
-returns the committed record.
+`add` returns a **committed** result with the new head; the text index is
+advanced in the same request, so a following `read` or `search` sees the
+write. `flush` remains a compatibility no-op for scripts.
 
 Useful commands:
 
